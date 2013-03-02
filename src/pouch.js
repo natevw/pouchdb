@@ -162,6 +162,16 @@ Pouch.Errors = {
     status: 400,
     error: 'bad_request',
     reason: 'Something wrong with the request'
+  },
+  FORBIDDEN: {
+    status: 403,
+    error: 'forbidden',
+    reason: 'The request was refused'
+  },
+  NOT_IMPLEMENTED: {
+    status: 502,
+    error: 'not_implemented',
+    reason: 'Unable to fulfill the request'
   }
 };
 
