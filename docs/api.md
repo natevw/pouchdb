@@ -14,6 +14,8 @@ Most of the Pouch API is exposed as `fun(arg, [options], [callback])` Where both
 * [Create a document](#create_a_document)
 * [Update a document](#update_a_document)
 * [Save an attachment](#save_an_attachment)
+* [Get an attachment](#get_an_attachment)
+* [Delete an attachment](#delete_an_attachment)
 * [Create a batch of documents](#create_a_batch_of_documents)
 * [Fetch a document](#fetch_a_document)
 * [Fetch documents](#fetch_documents)
@@ -26,13 +28,14 @@ Most of the Pouch API is exposed as `fun(arg, [options], [callback])` Where both
 
 ## Create a database
 
-    Pouch('idb://dbname', [options], [callback])
+    Pouch('dbname', [options], [callback])
+    Pouch('http://localhost:5984/dbname', [options], [callback])
 
-This method gets an existing database if one exists or creates a new one if one does not exist. The protocol field denotes which backend you want to use (current options are `idb`, `http` and `leveldb`)
+This method gets an existing database if one exists or creates a new one if one does not exist. You may also explicitly specify which backend you want to use for local database (e.g. `idb://dbname` or `leveldb://dbname`) but usually it is convenient to let PouchDB choose the best backend by itself.
 
     var pouchdb;
-    Pouch('idb://test', function(err, db) {
-       pouchdb = db;
+    Pouch('test', function(err, db) {
+      pouchdb = db;
       // Use pouchdb to call further functions
       pouchdb.post(....
     })
@@ -43,7 +46,7 @@ This method gets an existing database if one exists or creates a new one if one 
 
 Delete database with given name
 
-    Pouch.destroy('idb://test', function(err, info) {
+    Pouch.destroy('test', function(err, info) {
       // database deleted
     })
 
@@ -120,6 +123,40 @@ In this case the attachment data must be supplied as a base64 encoded string:
 
 See [Inline Attachments](http://wiki.apache.org/couchdb/HTTP_Document_API#Inline_Attachments)
 on the CouchDB Wiki.
+
+## Get an attachment
+
+     db.getAttachment(id, [callback])
+
+Get attachment data.
+
+    db.getAttachment('otherdoc/text', function(err, res) {
+      // Response:
+      // Blob or Buffer
+    })
+
+In node you get Buffers and Blobs in the browser.
+
+### Inline attachments
+
+You can specify `attachments: true` in most get operations.
+The attachment data will then be included in the attachment stubs.
+
+
+## Delete an attachment
+
+     db.removeAttachment(id, rev, [callback])
+
+Delete an attachment from a doc.
+
+    db.removeAttachment('otherdoc/text', '2-068E73F5B44FEC987B51354DFC772891', function(err, res) {
+      // Response:
+      // {
+      //   "ok": true,
+      //   "rev": "3-1F983211AB87EFCCC980974DFC27382F"
+      // }
+    })
+
 
 ## Create a batch of documents
 
@@ -446,7 +483,7 @@ Replicate one database to another.
 
 <span></span>
 
-    Pouch.replicate('idb://mydb', 'http://localhost:5984/mydb', function(err, changes) {
+    Pouch.replicate('mydb', 'http://localhost:5984/mydb', function(err, changes) {
       //
     })
 
