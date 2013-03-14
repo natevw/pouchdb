@@ -17,7 +17,8 @@ var srcFiles = [
 
 var testFiles = fs.readdirSync("./tests").filter(function(name){
   return (/^test\.([a-z0-9_])*\.js$/).test(name) &&
-    name !== 'test.spatial.js' && name !== 'test.auth_replication.js';
+    name !== 'test.spatial.js' && name !== 'test.auth_replication.js' &&
+    name !== 'test.gql.js';
 });
 
 var browserConfig = [{
@@ -43,14 +44,14 @@ module.exports = function(grunt) {
   var testResults = {};
 
   grunt.initConfig({
-    pkg: '<json:package.json>',
+    'pkg': '<json:package.json>',
 
-    clean: {
+    'clean': {
       build : ["./dist"],
       "node-qunit": ["./testdb_*"]
     },
 
-    concat: {
+    'concat': {
       options: {
         banner: "/*PouchDB*/\n(function() {\n ",
         footer: "\n })(this);"
@@ -80,10 +81,16 @@ module.exports = function(grunt) {
           "src/plugins/pouchdb.spatial.js"
         ]),
         dest: 'dist/pouchdb.spatial-nightly.js'
+      },
+      gql: {
+        src: grunt.util._.flatten([
+           srcFiles, "src/plugins/pouchdb.gql.js"
+        ]),
+        dest: 'dist/pouchdb.gql-nightly.js'
       }
     },
 
-    uglify: {
+    'uglify': {
       dist: {
         src: "./dist/pouchdb-nightly.js",
         dest: 'dist/pouchdb-nightly.min.js'
@@ -91,11 +98,15 @@ module.exports = function(grunt) {
       spatial: {
         src:  'dist/pouchdb.spatial-nightly.js',
         dest:  'dist/pouchdb.spatial-nightly.min.js'
+      },
+      gql: {
+        src:  'dist/pouchdb.gql-nightly.js',
+        dest:  'dist/pouchdb.gql-nightly.min.js'
       }
     },
 
     // Servers
-    connect : {
+    'connect' : {
       server: {
         options: {
           base: '.',
@@ -110,10 +121,7 @@ module.exports = function(grunt) {
     },
 
     jshint: {
-      files: ["src/adapter/*.js", "tests/*.js", "src/*.js"]
-    },
-
-    jshint: {
+      files: ["src/adapter/*.js", "tests/*.js", "src/*.js", "src/plugins/pouchdb.gql.js"],
       options: {
         curly: true,
         eqeqeq: true,
@@ -126,69 +134,84 @@ module.exports = function(grunt) {
         eqnull: true,
         browser: true,
         strict: true,
-        globalstrict: true
-      },
-      globals: {
+        globalstrict: true,
+        globals: {
           // Tests.
-        _: true,
-        QUnit: true,
-        asyncTest: true,
-        test: true,
-        DB: true,
-        deepEqual: true,
-        equal: true,
-        expect: true,
-        fail: true,
-        module: true,
-        nextTest: true,
-        notEqual: true,
-        ok: true,
-        sample: true,
-        start: true,
-        stop: true,
-        unescape: true,
-        process: true,
-        global: true,
-        require: true,
-        console: true,
-        Pouch: true
+          _: true,
+          QUnit: true,
+          asyncTest: true,
+          test: true,
+          DB: true,
+          deepEqual: true,
+          equal: true,
+          expect: true,
+          fail: true,
+          module: true,
+          nextTest: true,
+          notEqual: true,
+          ok: true,
+          sample: true,
+          start: true,
+          stop: true,
+          unescape: true,
+          process: true,
+          global: true,
+          require: true,
+          console: true,
+          Pouch: true
+        }
       }
     },
+
     'node-qunit': {
       all: {
         deps: ['./src/deps/extend.js','./src/deps/ajax.js','./src/pouch.js'],
         code: './src/adapters/pouch.leveldb.js',
-        tests: testFiles.map(function (n) { return "./tests/" + n; }),
+        tests: (function() {
+          var testFilesToRun = testFiles;
+
+          // takes in an optional --test=<regex> flag
+          // to allow running specific test files
+          var testFileRegex = grunt.option('test');
+          if (testFileRegex) {
+            testFilesToRun = testFilesToRun.filter(function (n) {
+              return new RegExp(testFileRegex, "i").test(n);
+            });
+          }
+          return testFilesToRun.map(function (n) {
+            return "./tests/" + n;
+          });
+        })(),
         done: function(err, res) {
           !err && (testResults['node'] = res);
-	       return true;
+          return true;
         }
       }
     },
 
     'saucelabs-qunit': {
       all: {
-	username: 'pouchdb',
-	key: '97de9ee0-2712-49f0-9b17-4b9751d79073',
-	testname: 'PouchDB Tests',
-	tags: [process.env.TRAVIS_BRANCH || "unknown"],
-	testTimeout: 1000 * 60 * 15, // 15 minutes
-	testInterval: 1000 * 30, // 30 seconds
-  tunnelTimeout: 1000 * 60 * 15, // 15 minutes
-	urls: ["http://127.0.0.1:8000/tests/test.html?test=release-min&id=" +
-               testStartTime.getTime() + "&testFiles=" + testFiles.join(',')],
-	browsers: browserConfig,
-	onTestComplete: function(status, page, config, browser) {
-	  var done = this.async();
-	  var browserDB = nano('http://127.0.0.1:5984').use('test_results');
-          var retries = 0;
-	  (function getResults() {
-	    browser.eval("window.testReport", function(err, val) {
-	      testResults[config.name] = err ? "No results" : val;
-	      done(true);
-	    });
-	  }());
-	}
+        username: 'pouchdb',
+        key: '97de9ee0-2712-49f0-9b17-4b9751d79073',
+        testname: 'PouchDB Tests',
+        tags: [process.env.TRAVIS_BRANCH || "unknown"],
+        testTimeout: 1000 * 60 * 15, // 15 minutes
+        testInterval: 1000 * 30, // 30 seconds
+        tunnelTimeout: 1000 * 60 * 15, // 15 minutes
+        urls: ["http://127.0.0.1:8000/tests/test.html?test=release-min&id=" +
+                     testStartTime.getTime() + "&testFiles=" + testFiles.join(',')],
+        browsers: browserConfig,
+        onTestComplete: function(status, page, config, browser) {
+          var done = this.async();
+          var browserDB = nano('http://127.0.0.1:5984').use('test_results');
+                var retries = 0;
+          (function getResults() {
+            browser.eval("window.testReport", function(err, val) {
+              testResults[config.name] = err ? "No results" : val;
+              done(true);
+            });
+          }());
+        }
       }
     },
     'publish-results': {
@@ -200,7 +223,7 @@ module.exports = function(grunt) {
   // Custom tasks
   grunt.registerTask("forever", 'Runs forever', function(){
     this.async();
-  })
+  });
 
   grunt.registerTask("cors-server", "Runs a CORS proxy", function(){
     var corsPort = arguments[0] || grunt.config("cors-server.port");
@@ -217,28 +240,28 @@ module.exports = function(grunt) {
     var done = this.async();
     cp.exec('git rev-list HEAD --max-count=1', function(err, stdout, stderr) {
       var results = {
-	started: testStartTime,
-	completed: new Date(),
-	git_hash: stdout.replace(/[\n\r]/g, ''),
-	passed: true,
-	runs: {},
-	runner: 'grunt'
+        started: testStartTime,
+        completed: new Date(),
+        git_hash: stdout.replace(/[\n\r]/g, ''),
+        passed: true,
+        runs: {},
+        runner: 'grunt'
       };
       for (var key in testResults) {
-	results.runs[key] = {
-	  started: testResults[key].started || "",
-	  completed: testResults[key].completed || "",
-	  passed: !!(testResults[key].passed),
-	  report: testResults[key]
-	};
-  console.log("Test Result for %s is %s".yellow , key , results.runs[key].passed);
-	results.passed = results.passed && results.runs[key].passed;
+        results.runs[key] = {
+          started: testResults[key].started || "",
+          completed: testResults[key].completed || "",
+          passed: !!(testResults[key].passed),
+          report: testResults[key]
+        };
+        console.log("Test Result for %s is %s".yellow , key , results.runs[key].passed);
+        results.passed = results.passed && results.runs[key].passed;
       }
       nano(grunt.config("publish-results.server"))
         .use(grunt.config("publish-results.db"))
         .insert(results, testStartTime.getTime() + "", function(err, body){
-	  console.log(testStartTime.getTime(), err ? err.message : body);
-	  done(results.passed && err == null);
+          console.log(testStartTime.getTime(), err ? err.message : body);
+          done(results.passed && err === null);
         });
     });
   });
@@ -254,10 +277,11 @@ module.exports = function(grunt) {
   grunt.loadNpmTasks('grunt-contrib-watch');
 
   grunt.registerTask("build", ["concat:amd", "concat:all" , "uglify:dist"]);
-  
+
   grunt.registerTask("testSetup", ["jshint", "build", "connect", "cors-server"]);
   grunt.registerTask("test", ["testSetup", "node-qunit" ,"saucelabs-qunit", "publish-results"]);
   grunt.registerTask("full", ["concat", "uglify"]);
   grunt.registerTask("spatial", ["concat:spatial", "uglify:spatial"]);
+  grunt.registerTask("gql", ["concat:gql", "uglify:gql"]);
   grunt.registerTask('default', 'build');
 };
