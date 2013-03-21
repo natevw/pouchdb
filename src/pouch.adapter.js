@@ -1,4 +1,4 @@
-/*globals yankError: false, extend: false, call: false, parseDocId: false */
+/*globals yankError: false, extend: false, call: false, parseDocId: false, traverseRevTree: false, collectLeaves: false */
 
 "use strict";
 
@@ -9,6 +9,7 @@ var PouchAdapter = function(opts, callback) {
 
 
   var api = {};
+
   var customApi = Pouch.adapters[opts.adapter](opts, function(err, db) {
     if (err) {
       if (callback) {
@@ -22,7 +23,14 @@ var PouchAdapter = function(opts, callback) {
         db[j] = api[j];
       }
     }
-    callback(err, db);
+
+    // Don't call Pouch.open for ALL_DBS
+    // Pouch.open saves the db's name into ALL_DBS
+    if (opts.name === Pouch.ALL_DBS) {
+      callback(err, db);
+    } else {
+      Pouch.open(opts.adapter, opts.name, function(err) { callback(err, db); });
+    }
   });
 
 
@@ -156,12 +164,80 @@ var PouchAdapter = function(opts, callback) {
     });
   };
 
+  // compact one document and fire callback
+  // by compacting we mean removing all revisions which
+  // are not leaves in revision tree
+  var compactDocument = function(docId, callback) {
+    customApi._getRevisionTree(docId, function(rev_tree){
+      var nonLeaves = [];
+      traverseRevTree(rev_tree, function(isLeaf, pos, id) {
+        var rev = pos + '-' + id;
+        if (!isLeaf) {
+          nonLeaves.push(rev);
+        }
+      });
+      customApi._removeDocRevisions(docId, nonLeaves, callback);
+    });
+  };
+  // compact the whole database using single document
+  // compaction
+  api.compact = function(callback) {
+    api.allDocs(function(err, res) {
+      var count = res.rows.length;
+      if (!count) {
+        call(callback);
+        return;
+      }
+      res.rows.forEach(function(row) {
+        compactDocument(row.key, function() {
+          count--;
+          if (!count) {
+            call(callback);
+          }
+        });
+      });
+    });
+  };
+
 
   /* Begin api wrappers. Specific functionality to storage belongs in the _[method] */
   api.get = function (id, opts, callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('get', arguments);
+      return;
+    }
     if (typeof opts === 'function') {
       callback = opts;
       opts = {};
+    }
+
+    if (opts.open_revs) {
+      customApi._getRevisionTree(id, function(rev_tree){
+        var leaves = [];
+        if (opts.open_revs === "all") {
+          leaves = collectLeaves(rev_tree).map(function(leaf){
+            return leaf.rev;
+          });
+        } else {
+          leaves = opts.open_revs; // should be some validation here
+        }
+        var result = [];
+        var count = leaves.length;
+        leaves.forEach(function(leaf){
+          api.get(id, {rev: leaf}, function(err, doc){
+            if (!err) {
+              result.push({ok: doc});
+            } else {
+              result.push({missing: leaf});
+            }
+            count--;
+            if(!count) {
+              call(callback, null, result);
+            }
+          });
+        });
+      });
+      return;
     }
 
     id = parseDocId(id);
@@ -185,6 +261,10 @@ var PouchAdapter = function(opts, callback) {
   };
 
   api.allDocs = function(opts, callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('allDocs', arguments);
+      return;
+    }
     if (typeof opts === 'function') {
       callback = opts;
       opts = {};
@@ -208,26 +288,42 @@ var PouchAdapter = function(opts, callback) {
   };
 
   api.changes = function(opts) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('changes', arguments);
+      return;
+    }
     return customApi._changes(opts);
   };
 
   api.close = function(callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('close', arguments);
+      return;
+    }
     return customApi._close(callback);
   };
 
   api.info = function(callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('info', arguments);
+      return;
+    }
     return customApi._info(callback);
   };
-  
+
   api.id = function() {
     return customApi._id();
   };
-  
+
   api.type = function() {
     return (typeof customApi._type === 'function') ? customApi._type() : opts.adapter;
   };
 
   api.bulkDocs = function(req, opts, callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('bulkDocs', arguments);
+      return;
+    }
     if (typeof opts === 'function') {
       callback = opts;
       opts = {};
@@ -252,6 +348,31 @@ var PouchAdapter = function(opts, callback) {
   };
 
   /* End Wrappers */
+  var taskqueue = {};
+
+  taskqueue.ready = false;
+  taskqueue.queue = [];
+
+  api.taskqueue = {};
+
+  api.taskqueue.execute = function (db) {
+    if (taskqueue.ready) {
+      taskqueue.queue.forEach(function(d) {
+        db[d.task].apply(null, d.parameters);
+      });
+    }
+  };
+
+  api.taskqueue.ready = function() {
+    if (arguments.length === 0) {
+      return taskqueue.ready;
+    }
+    taskqueue.ready = arguments[0];
+  };
+
+  api.taskqueue.addTask = function(task, parameters) {
+    taskqueue.queue.push({ task: task, parameters: parameters });
+  };
 
   api.replicate = {};
 
@@ -276,6 +397,13 @@ var PouchAdapter = function(opts, callback) {
       customApi[j] = api[j];
     }
   }
+
+  // Http adapter can skip setup so we force the db to be ready and execute any jobs
+  if (opts.skipSetup) {
+    api.taskqueue.ready(true);
+    api.taskqueue.execute(api);
+  }
+
   return customApi;
 };
 

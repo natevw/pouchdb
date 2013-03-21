@@ -55,6 +55,16 @@ function readBlob(blob, callback) {
   }
 }
 
+function openTestAsyncDB(name) {
+  return new Pouch(name, function(err,db) {
+    if (err) {
+      console.error(err);
+      ok(false, 'failed to open database');
+      return start();
+    }
+  });
+}
+
 function openTestDB(name, callback) {
   new Pouch(name, function(err, db) {
     if (err) {
@@ -100,9 +110,15 @@ function generateAdapterUrl(id) {
   }
 }
 
-
+// Put doc after prevRev (so that doc is a child of prevDoc
+// in rev_tree). Doc must have _rev. If prevRev is not specified 
+// just insert doc with correct _rev (new_edits=false!)
 function putAfter(db, doc, prevRev, callback){
   var newDoc = extend({}, doc);
+  if (!prevRev) {
+    db.put(newDoc, {new_edits: false}, callback);
+    return;
+  }
   newDoc._revisions = {
     start: +newDoc._rev.split('-')[0],
     ids: [
@@ -123,6 +139,7 @@ if (typeof module !== 'undefined' && module.exports) {
     initTestDB: initTestDB,
     initDBPair: initDBPair,
     openTestDB: openTestDB,
+    openTestAsyncDB: openTestAsyncDB,
     generateAdapterUrl: generateAdapterUrl,
     putAfter: putAfter,
     PERSIST_DATABASES: PERSIST_DATABASES
