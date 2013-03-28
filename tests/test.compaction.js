@@ -1,11 +1,12 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
-/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true, putAfter: false */
+/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true, putTree: false */
 /*globals ajax: true, LevelPouch: true, makeDocs: false */
 
 "use strict";
 
 var adapters = ['local-1'];
 var qunit = module;
+var LevelPouch;
 
 // if we are running under node.js, set things up
 // a little differently, and only test the leveldb adapter
@@ -81,32 +82,6 @@ adapters.map(function(adapter) {
     });
   });
 
-  // docs will be inserted one after another
-  // starting from root
-  var insertBranch = function(db, docs, callback) {
-    function insert(i) {
-      var doc = docs[i];
-      var prev = i > 0 ? docs[i-1]._rev : null;
-      function next() {
-        if (i < docs.length - 1) {
-          insert(i+1);
-        } else {
-          callback();
-        }
-      }
-      db.get(doc._id, {rev: doc._rev}, function(err, ok){
-        if(err){
-          putAfter(db, docs[i], prev, function() {
-            next();
-          });
-        }else{
-          next();
-        }
-      });
-    }
-    insert(0);
-  };
-
   var checkBranch = function(db, docs, callback) {
     function check(i) {
       var doc = docs[i];
@@ -136,39 +111,25 @@ adapters.map(function(adapter) {
     check(0);
   };
 
-  var putTree = function(db, tree, callback) {
-    function insert(i) {
-      var branch = tree[i];
-      insertBranch(db, branch, function() {
-        if (i < tree.length - 1) {
-          insert(i+1);
-        } else {
-          callback();
-        }
-      });
-    }
-    insert(0);
-  };
-
-  var exampleTree = [ 
+  var exampleTree = [
     [
       {_id: "foo", _rev: "1-a", value: "foo a"},
       {_id: "foo", _rev: "2-b", value: "foo b"},
       {_id: "foo", _rev: "3-c", value: "foo c"}
-  ],
-  [
-    {_id: "foo", _rev: "1-a", value: "foo a"},
-    {_id: "foo", _rev: "2-d", value: "foo d"},
-    {_id: "foo", _rev: "3-e", value: "foo e"},
-    {_id: "foo", _rev: "4-f", value: "foo f"}
-  ],
-  [
-    {_id: "foo", _rev: "1-a", value: "foo a"},
-    {_id: "foo", _rev: "2-g", value: "foo g"},
-    {_id: "foo", _rev: "3-h", value: "foo h"},
-    {_id: "foo", _rev: "4-i", value: "foo i"},
-    {_id: "foo", _rev: "5-j", _deleted: true, value: "foo j"}
-  ]
+    ],
+    [
+      {_id: "foo", _rev: "1-a", value: "foo a"},
+      {_id: "foo", _rev: "2-d", value: "foo d"},
+      {_id: "foo", _rev: "3-e", value: "foo e"},
+      {_id: "foo", _rev: "4-f", value: "foo f"}
+    ],
+    [
+      {_id: "foo", _rev: "1-a", value: "foo a"},
+      {_id: "foo", _rev: "2-g", value: "foo g"},
+      {_id: "foo", _rev: "3-h", value: "foo h"},
+      {_id: "foo", _rev: "4-i", value: "foo i"},
+      {_id: "foo", _rev: "5-j", _deleted: true, value: "foo j"}
+    ]
   ];
 
   var exampleTree2 = [
@@ -227,6 +188,36 @@ adapters.map(function(adapter) {
               checkTree(db, exampleTree2, function() {
                 ok(1, "checks finished");
                 start();
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+
+  asyncTest('Auto-compaction test', function() {
+    initTestDB(this.name, {auto_compaction: true}, function(err, db) {
+      var doc = {_id: "doc", val: "1"};
+      db.post(doc, function(err, res) {
+        var rev1 = res.rev;
+        doc._rev = rev1;
+        doc.val = "2";
+        db.post(doc, function(err, res) {
+          var rev2 = res.rev;
+          doc._rev = rev2;
+          doc.val = "3";
+          db.post(doc, function(err, res) {
+            var rev3 = res.rev;
+            db.get("doc", {rev: rev1}, function(err, doc) {
+              ok(err.status === 404 && err.error === "not_found", 
+                "compacted document is missing");
+              db.get("doc", {rev: rev2}, function(err, doc) { 
+                ok(!err, "leaf's parent does not get compacted");
+                db.get("doc", {rev: rev3}, function(err, doc) {
+                  ok(!err, "leaf revision does not get compacted");
+                  start();
+                });
               });
             });
           });

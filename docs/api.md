@@ -25,35 +25,33 @@ Most of the Pouch API is exposed as `fun(arg, [options], [callback])` Where both
 * [Get database information](#get_database_information)
 * [Listen to database changes](#listen_to_database_changes)
 * [Replicate a database](#replicate_a_database)
+* [Compact the database](#compact_the_database)
 * [Get document revision diffs](#document_revisions_diff)
 
 ## List all databases
 
     Pouch.allDbs(callback)
 
-Retrieves all databases from PouchDB.
+Retrieves all databases from PouchDB. (Adapter prefix of database is included if it was created with a prefix.)
 
     Pouch.allDbs(function(err, response) {
         // Response:
         // [
-        //    "idb://testdb",
+        //    "testdb",
         //    "idb://testdb2"
         // ]
     })
 
 ## Create a database
 
-    Pouch('dbname', [options], [callback])
-    Pouch('http://localhost:5984/dbname', [options], [callback])
+    var pouchdb = Pouch('dbname', [options])
+    var pouchdb = Pouch('http://localhost:5984/dbname', [options])
 
 This method gets an existing database if one exists or creates a new one if one does not exist. You may also explicitly specify which backend you want to use for local database (e.g. `idb://dbname` or `leveldb://dbname`) but usually it is convenient to let PouchDB choose the best backend by itself.
 
-    var pouchdb;
-    Pouch('test', function(err, db) {
-      pouchdb = db;
-      // Use pouchdb to call further functions
-      pouchdb.post(....
-    })
+    var pouchdb = Pouch('test');
+
+    pouchdb.post(...;
 
 ## Delete a database
 
@@ -243,7 +241,7 @@ Fetch multiple documents, deleted document are only included if `options.keys` i
 * `options.keys`: array of keys you want to get
     - neither `startkey` nor `endkey` can be specified with this option
     - the rows are returned in the same order as the supplied "keys" array
-    - the row for a deleted document will have the revision ID of the deletion, and an extra key "deleted":true in the "value" property 
+    - the row for a deleted document will have the revision ID of the deletion, and an extra key "deleted":true in the "value" property
     - the row for a nonexistent document will just contain an "error" property with the value "not_found"
 * `options.attachments`: Include attachment data
 
@@ -415,7 +413,7 @@ If `options.continuous` is set it returns object with one method `cancel` which 
 * `options.since`: Start the results from the change immediately after the given sequence number
 * `options.complete`: Function called when all changes have been processed
 * `options.continuous`: Use _longpoll_ feed
-* `options.onChange`: Function called on each change after deduplication (only sends the most recent for each document), not called as a callback but called as onChange(change). Use with `continuous` flag. If you want to 
+* `options.onChange`: Function called on each change after deduplication (only sends the most recent for each document), not called as a callback but called as onChange(change). Use with `continuous` flag. If you want to
 
 <span></span>
 
@@ -502,11 +500,19 @@ Replicate one database to another.
       //
     })
 
+## Compact the database
+
+    db.compact([opts], [callback])
+
+Runs compaction of the database. Fires callback when compaction is done. If you use http adapter and have specified callback Pouch will ping the remote database in regular intervals unless the compaction is finished.
+
+* `options.interval`: Number of milliseconds Pouch waits before asking again if compaction is already done. Only for http adapter.
+
 ## Document Revisions Diff
 
     db.revsDiff(diff, [callback])
 
-Given a set of document/revision IDs, returns the subset of those that do not correspond 
+Given a set of document/revision IDs, returns the subset of those that do not correspond
 to revisions stored in the database. Primarily used in replication.
 
     db.revsDiff({

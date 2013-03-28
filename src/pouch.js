@@ -1,4 +1,4 @@
-/*globals PouchAdapter: true */
+/*globals PouchAdapter: true, extend: true */
 
 "use strict";
 
@@ -23,6 +23,7 @@ var Pouch = function Pouch(name, opts, callback) {
   }
 
   var backend = Pouch.parseAdapter(opts.name || name);
+  opts.originalName = name;
   opts.name = opts.name || backend.name;
   opts.adapter = opts.adapter || backend.adapter;
 
@@ -178,7 +179,8 @@ Pouch.allDBName = function(adapter) {
   return [adapter, "://", Pouch.ALL_DBS].join('');
 };
 
-Pouch.open = function(adapter, name, callback) {
+Pouch.open = function(opts, callback) {
+  var adapter = opts.adapter;
   // skip http and https adaptors for allDbs
   if (adapter === "http" || adapter === "https") {
     callback();
@@ -192,13 +194,13 @@ Pouch.open = function(adapter, name, callback) {
     }
 
     // check if db has been registered in Pouch.ALL_DBS
-    var dbname = Pouch.dbName(adapter, name);
+    var dbname = Pouch.dbName(adapter, opts.name);
     db.get(dbname, function(err, response) {
       if (err) {
         if (err.status === 404) {
           db.put({
             _id: dbname,
-            dbname: Pouch.realDBName(adapter, name)
+            dbname: opts.originalName 
           }, callback);
         } else {
           callback(err);
@@ -339,17 +341,19 @@ Pouch.Errors = {
     reason: 'Unable to fulfill the request'
   }
 };
-
+Pouch.error = function(error, reason){
+ return extend({}, error, {reason: reason});
+};
 if (typeof module !== 'undefined' && module.exports) {
   global.Pouch = Pouch;
   Pouch.merge = require('./pouch.merge.js').merge;
   Pouch.collate = require('./pouch.collate.js').collate;
   Pouch.replicate = require('./pouch.replicate.js').replicate;
   Pouch.utils = require('./pouch.utils.js');
+  extend = Pouch.utils.extend;
   module.exports = Pouch;
-
   var PouchAdapter = require('./pouch.adapter.js');
-  // load adapters known to work under node
+  //load adapters known to work under node
   var adapters = ['leveldb', 'http'];
   adapters.map(function(adapter) {
     var adapter_path = './adapters/pouch.'+adapter+'.js';

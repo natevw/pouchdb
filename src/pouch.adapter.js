@@ -1,4 +1,5 @@
-/*globals yankError: false, extend: false, call: false, parseDocId: false, traverseRevTree: false, collectLeaves: false */
+/*globals Pouch: true, yankError: false, extend: false, call: false, parseDocId: false, traverseRevTree: false, collectLeaves: false */
+/*globals collectConflicts: false, arrayFirst: false, rootToLeaf: false, computeHeight: false */
 
 "use strict";
 
@@ -6,7 +7,6 @@
  * A generic pouch adapter
  */
 var PouchAdapter = function(opts, callback) {
-
 
   var api = {};
 
@@ -29,17 +29,49 @@ var PouchAdapter = function(opts, callback) {
     if (opts.name === Pouch.ALL_DBS) {
       callback(err, db);
     } else {
-      Pouch.open(opts.adapter, opts.name, function(err) { callback(err, db); });
+      Pouch.open(opts, function(err) {
+        callback(err, db);
+      });
     }
   });
 
+  var auto_compaction = (opts.auto_compaction === true);
+
+  // wraps a callback with a function that runs compaction after each edit
+  var autoCompact = function(callback) {
+    if (!auto_compaction) {
+      return callback;
+    }
+    return function(err, res) {
+      if (err) {
+        call(callback, err);
+      } else {
+        var count = res.length;
+        var decCount = function() {
+          count--;
+          if (!count) {
+            call(callback, null, res);
+          }
+        };
+        res.forEach(function(doc) {
+          if (doc.ok) {
+            // TODO: we need better error handling
+            compactDocument(doc.id, 1, decCount);
+          } else {
+            decCount();
+          }
+        });
+      }
+    };
+  };
 
   api.post = function (doc, opts, callback) {
     if (typeof opts === 'function') {
       callback = opts;
       opts = {};
     }
-    return customApi.bulkDocs({docs: [doc]}, opts, yankError(callback));
+    return customApi.bulkDocs({docs: [doc]}, opts,
+        autoCompact(yankError(callback)));
   };
 
   api.put = function(doc, opts, callback) {
@@ -51,9 +83,9 @@ var PouchAdapter = function(opts, callback) {
     if (!doc || !('_id' in doc)) {
       return call(callback, Pouch.Errors.MISSING_ID);
     }
-    return customApi.bulkDocs({docs: [doc]}, opts, yankError(callback));
+    return customApi.bulkDocs({docs: [doc]}, opts,
+        autoCompact(yankError(callback)));
   };
-
 
   api.putAttachment = function (id, rev, blob, type, callback) {
     if (typeof type === 'function') {
@@ -131,7 +163,6 @@ var PouchAdapter = function(opts, callback) {
     return customApi.bulkDocs({docs: [newDoc]}, opts, yankError(callback));
   };
 
-
   api.revsDiff = function (req, opts, callback) {
     if (typeof opts === 'function') {
       callback = opts;
@@ -166,19 +197,23 @@ var PouchAdapter = function(opts, callback) {
 
   // compact one document and fire callback
   // by compacting we mean removing all revisions which
-  // are not leaves in revision tree
-  var compactDocument = function(docId, callback) {
-    customApi._getRevisionTree(docId, function(rev_tree){
+  // are further from the leaf in revision tree than max_height
+  var compactDocument = function(docId, max_height, callback) {
+    customApi._getRevisionTree(docId, function(err, rev_tree){
+      if (err) {
+        return call(callback);
+      }
+      var height = computeHeight(rev_tree);
       var nonLeaves = [];
-      traverseRevTree(rev_tree, function(isLeaf, pos, id) {
-        var rev = pos + '-' + id;
-        if (!isLeaf) {
+      Object.keys(height).forEach(function(rev) {
+        if (height[rev] > max_height) {
           nonLeaves.push(rev);
         }
       });
       customApi._removeDocRevisions(docId, nonLeaves, callback);
     });
   };
+
   // compact the whole database using single document
   // compaction
   api.compact = function(callback) {
@@ -189,7 +224,7 @@ var PouchAdapter = function(opts, callback) {
         return;
       }
       res.rows.forEach(function(row) {
-        compactDocument(row.key, function() {
+        compactDocument(row.key, 0, function() {
           count--;
           if (!count) {
             call(callback);
@@ -198,7 +233,6 @@ var PouchAdapter = function(opts, callback) {
       });
     });
   };
-
 
   /* Begin api wrappers. Specific functionality to storage belongs in the _[method] */
   api.get = function (id, opts, callback) {
@@ -211,41 +245,129 @@ var PouchAdapter = function(opts, callback) {
       opts = {};
     }
 
+    var leaves = [];
+    function finishOpenRevs() {
+      var result = [];
+      var count = leaves.length;
+      if (!count) {
+        return call(callback, null, result);
+      }
+      // order with open_revs is unspecified
+      leaves.forEach(function(leaf){
+        api.get(id, {rev: leaf, revs: opts.revs}, function(err, doc){
+          if (!err) {
+            result.push({ok: doc});
+          } else {
+            result.push({missing: leaf});
+          }
+          count--;
+          if(!count) {
+            call(callback, null, result);
+          }
+        });
+      });
+    }
+
     if (opts.open_revs) {
-      customApi._getRevisionTree(id, function(rev_tree){
-        var leaves = [];
-        if (opts.open_revs === "all") {
+      if (opts.open_revs === "all") {
+        customApi._getRevisionTree(id, function(err, rev_tree){
+          if (err) {
+            // if there's no such document we should treat this
+            // situation the same way as if revision tree was empty
+            rev_tree = [];
+          }
           leaves = collectLeaves(rev_tree).map(function(leaf){
             return leaf.rev;
           });
-        } else {
-          leaves = opts.open_revs; // should be some validation here
-        }
-        var result = [];
-        var count = leaves.length;
-        leaves.forEach(function(leaf){
-          api.get(id, {rev: leaf}, function(err, doc){
-            if (!err) {
-              result.push({ok: doc});
-            } else {
-              result.push({missing: leaf});
-            }
-            count--;
-            if(!count) {
-              call(callback, null, result);
-            }
-          });
+          finishOpenRevs();
         });
-      });
-      return;
+      } else {
+        if (Array.isArray(opts.open_revs)) {
+          leaves = opts.open_revs;
+          for (var i = 0; i < leaves.length; i++) {
+            var l = leaves[i];
+            // looks like it's the only thing couchdb checks
+            if (!(typeof(l) === "string" && /^\d+-/.test(l))) {
+              return call(callback, Pouch.error(Pouch.Errors.BAD_REQUEST,
+                "Invalid rev format" ));
+            }
+          }
+          finishOpenRevs();
+        } else {
+          return call(callback, Pouch.error(Pouch.Errors.UNKNOWN_ERROR,
+            'function_clause'));
+        }
+      }
+      return; // open_revs does not like other options
     }
 
     id = parseDocId(id);
     if (id.attachmentId !== '') {
       return customApi.getAttachment(id, callback);
     }
-    return customApi._get(id, opts, callback);
+    return customApi._get(id, opts, function(result, metadata) {
+      if ('error' in result) {
+        return call(callback, result);
+      }
 
+      var doc = result;
+      function finish() {
+        call(callback, null, doc);
+      }
+
+      if (opts.conflicts) {
+        var conflicts = collectConflicts(metadata);
+        if (conflicts.length) {
+          doc._conflicts = conflicts;
+        }
+      }
+
+      if (opts.revs || opts.revs_info) {
+        var path = arrayFirst(rootToLeaf(metadata.rev_tree), function(arr) {
+          return arr.ids.indexOf(doc._rev.split('-')[1]) !== -1;
+        });
+        path.ids.splice(path.ids.indexOf(doc._rev.split('-')[1]) + 1);
+        path.ids.reverse();
+
+        if (opts.revs) {
+          doc._revisions = {
+            start: (path.pos + path.ids.length) - 1,
+            ids: path.ids
+          };
+        }
+        if (opts.revs_info) {
+          // TODO: it could be slow to test status like this
+          var count = path.ids.length;
+          var pos = path.pos + path.ids.length - 1;
+          doc._revs_info = [];
+
+          path.ids.forEach(function(hash) {
+            var rev = pos + '-' + hash;
+            var info = {
+              rev: rev,
+              status: "available"
+            };
+            pos--;
+            doc._revs_info.push(info);
+
+            api.get(id.docId, {rev: rev}, function(err, ok) {
+              if (err) {
+                info.status = "missing";
+              }
+              count--;
+              if (!count) {
+                finish();
+              }
+            });
+          });
+        } else {
+          finish();
+        }
+      } else {
+        finish();
+      }
+      
+    });
   };
 
   api.getAttachment = function(id, opts, callback) {
@@ -271,15 +393,15 @@ var PouchAdapter = function(opts, callback) {
     }
     if ('keys' in opts) {
       if ('startkey' in opts) {
-        call(callback, extend({
-          reason: 'Query parameter `start_key` is not compatible with multi-get'
-        }, Pouch.Errors.QUERY_PARSE_ERROR));
+        call(callback, Pouch.error(Pouch.Errors.QUERY_PARSE_ERROR,
+          'Query parameter `start_key` is not compatible with multi-get'
+        ));
         return;
       }
       if ('endkey' in opts) {
-        call(callback, extend({
-          reason: 'Query parameter `end_key` is not compatible with multi-get'
-        }, Pouch.Errors.QUERY_PARSE_ERROR));
+        call(callback, Pouch.error(Pouch.Errors.QUERY_PARSE_ERROR,
+          'Query parameter `end_key` is not compatible with multi-get'
+        ));
         return;
       }
     }
@@ -292,6 +414,7 @@ var PouchAdapter = function(opts, callback) {
       api.taskqueue.addTask('changes', arguments);
       return;
     }
+    opts = extend(true, {}, opts);
     return customApi._changes(opts);
   };
 
@@ -330,6 +453,8 @@ var PouchAdapter = function(opts, callback) {
     }
     if (!opts) {
       opts = {};
+    } else {
+      opts = extend(true, {}, opts);
     }
 
     if (!req || !req.docs || req.docs.length < 1) {
@@ -340,11 +465,12 @@ var PouchAdapter = function(opts, callback) {
       return call(callback, Pouch.Errors.QUERY_PARSE_ERROR);
     }
 
+    req = extend(true, {}, req);
     if (!('new_edits' in opts)) {
       opts.new_edits = true;
     }
 
-    return customApi._bulkDocs(req, opts, callback);
+    return customApi._bulkDocs(req, opts, autoCompact(callback));
   };
 
   /* End Wrappers */

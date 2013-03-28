@@ -62,6 +62,22 @@ adapters.map(function(adapters) {
     });
   });
 
+
+  asyncTest("Test basic pull replication plain api", function() {
+    console.info('Starting Test: Test basic pull replication plain api');
+    var self = this;
+    initDBPair(this.name, this.remote, function(db, remote) {
+      remote.bulkDocs({docs: docs}, {}, function(err, results) {
+        Pouch.replicate(self.remote, self.name, {}, function(err, result) {
+          ok(result.ok, 'replication was ok');
+          equal(result.docs_written, docs.length, 'correct # docs written');
+          start();
+        });
+      });
+    });
+  });
+
+
   asyncTest("Local DB contains documents", function() {
     console.info('Starting Test: Local DB contains documents');
     var self = this;
@@ -446,7 +462,6 @@ adapters.map(function(adapters) {
         db.replicate.from(remote, {
           filter: function(doc) { return doc.integer % 2 === 0; }
         }, function(err, response){
-          db.allDocs(function(err, docs) {console.log(docs);});
           remote.bulkDocs({docs:more_docs}, function(err, info) {
             db.replicate.from(remote, {
               filter: function(doc) { return doc.integer % 2 === 0; }
@@ -650,6 +665,23 @@ deletedDocAdapters.map(function(adapters) {
     initDBPair(self.name, self.remote, function(){
       // Rinse, repeat our workflow...
       workflow(self.name, self.remote, runs);
+    });
+  });
+
+  asyncTest("issue #300 rev id unique per doc", 3, function() {
+    var docs = [{_id: "a"}, {_id: "b"}];
+    var self = this;
+    initDBPair(this.name, this.remote, function(db, remote) {
+      remote.bulkDocs({docs: docs}, {}, function(err, _){
+        db.replicate.from(self.remote, function(err, _){
+          db.allDocs(function(err, result){
+            ok(result.rows.length === 2, "correct number of rows");
+            ok(result.rows[0].id === "a", "first doc ok");
+            ok(result.rows[1].id === "b", "second doc ok");
+            start();
+          });
+        });
+      });
     });
   });
 });

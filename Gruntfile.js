@@ -28,9 +28,9 @@ var browserConfig = [{
   'chrome.switches' : ['disable-file-system']
 }, {
   browserName: 'firefox',
-  version: '17',
-  platform: 'Windows 2003',
-  name: 'win2003/firefox'
+  version: '19',
+  platform: 'Linux',
+  name: 'linux/firefox'
 // }, {
 //   browserName: 'opera',
 //   version: '12',
@@ -121,7 +121,7 @@ module.exports = function(grunt) {
     },
 
     jshint: {
-      files: ["src/adapter/*.js", "tests/*.js", "src/*.js", "src/plugins/pouchdb.gql.js"],
+      files: ["src/adapters/*.js", "tests/*.js", "src/*.js", "src/plugins/pouchdb.gql.js"],
       options: {
         curly: true,
         eqeqeq: true,
@@ -215,13 +215,14 @@ module.exports = function(grunt) {
       }
     },
     'publish-results': {
-      server: 'http://pouchdb.iriscouch.com',
+      server: 'http://couchdb.pouchdb.com',
       db: 'test_results'
     }
   });
 
   // Custom tasks
   grunt.registerTask("forever", 'Runs forever', function(){
+    console.log("Visit http://127.0.0.1:8000/tests/test.html in your browser to run tests.");
     this.async();
   });
 
@@ -277,7 +278,7 @@ module.exports = function(grunt) {
   grunt.loadNpmTasks('grunt-contrib-watch');
 
   grunt.registerTask("build", ["concat:amd", "concat:all" , "uglify:dist"]);
-
+  grunt.registerTask("browser", ["connect", "cors-server", "forever"])
   grunt.registerTask("testSetup", ["jshint", "build", "connect", "cors-server"]);
   grunt.registerTask("test", ["testSetup", "node-qunit" ,"saucelabs-qunit", "publish-results"]);
   grunt.registerTask("full", ["concat", "uglify"]);

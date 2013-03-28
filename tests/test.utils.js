@@ -65,8 +65,12 @@ function openTestAsyncDB(name) {
   });
 }
 
-function openTestDB(name, callback) {
-  new Pouch(name, function(err, db) {
+function openTestDB(name, opts, callback) {
+  if (typeof opts === 'function') {
+    callback = opts;
+    opts = {};
+  }
+  new Pouch(name, opts, function(err, db) {
     if (err) {
       console.error(err);
       ok(false, 'failed to open database');
@@ -76,7 +80,7 @@ function openTestDB(name, callback) {
   });
 }
 
-function initTestDB(name, callback) {
+function initTestDB(name, opts, callback) {
   // ignore errors, the database might not exist
   Pouch.destroy(name, function(err) {
     if (err && err.status !== 404 && err.statusText !== 'timeout') {
@@ -84,7 +88,7 @@ function initTestDB(name, callback) {
       ok(false, 'failed to open database');
       return start();
     }
-    openTestDB(name, callback);
+    openTestDB(name, opts, callback);
   });
 }
 
@@ -129,6 +133,48 @@ function putAfter(db, doc, prevRev, callback){
   db.put(newDoc, {new_edits: false}, callback);
 }
 
+// docs will be inserted one after another
+// starting from root
+var putBranch = function(db, docs, callback) {
+  function insert(i) {
+    var doc = docs[i];
+    var prev = i > 0 ? docs[i-1]._rev : null;
+    function next() {
+      if (i < docs.length - 1) {
+        insert(i+1);
+      } else {
+        callback();
+      }
+    }
+    db.get(doc._id, {rev: doc._rev}, function(err, ok){
+      if(err){
+        putAfter(db, docs[i], prev, function() {
+          next();
+        });
+      }else{
+        next();
+      }
+    });
+  }
+  insert(0);
+};
+
+
+var putTree = function(db, tree, callback) {
+  function insert(i) {
+    var branch = tree[i];
+    putBranch(db, branch, function() {
+      if (i < tree.length - 1) {
+        insert(i+1);
+      } else {
+        callback();
+      }
+    });
+  }
+  insert(0);
+};
+
+
 if (typeof module !== 'undefined' && module.exports) {
   Pouch = require('../src/pouch.js');
   module.exports = {
@@ -142,6 +188,8 @@ if (typeof module !== 'undefined' && module.exports) {
     openTestAsyncDB: openTestAsyncDB,
     generateAdapterUrl: generateAdapterUrl,
     putAfter: putAfter,
+    putBranch: putBranch,
+    putTree: putTree,
     PERSIST_DATABASES: PERSIST_DATABASES
   };
 }

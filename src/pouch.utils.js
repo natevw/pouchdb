@@ -1,6 +1,7 @@
 /*jshint strict: false */
 /*global request: true, Buffer: true, escape: true, $:true */
 /*global extend: true, Crypto: true */
+/*global chrome*/
 
 // Pretty dumb name for a function, just wraps callback calls so we dont
 // to if (callback) callback() everywhere
@@ -232,20 +233,47 @@ var collectLeaves = function(revs) {
   return leaves;
 };
 
-var collectConflicts = function(revs, deletions) {
-  // Remove all deleted leaves
-  var leaves = collectLeaves(revs);
-  for(var i = 0; i < leaves.length; i++){
-    var leaf = leaves.shift();
+// returns all conflicts that is leaves such that
+// 1. are not deleted and
+// 2. are different than winning revision
+var collectConflicts = function(metadata) {
+  var win = Pouch.merge.winningRev(metadata);
+  var leaves = collectLeaves(metadata.rev_tree);
+  var conflicts = [];
+  leaves.forEach(function(leaf) {
     var rev = leaf.rev.split("-")[1]; 
-    if(deletions && !deletions[rev]){
-      leaves.push(leaf);
+    if ((!metadata.deletions || !metadata.deletions[rev]) && leaf.rev !== win) {
+      conflicts.push(leaf.rev);
     } 
-  }
+  });
+  return conflicts;
+};
 
-  // First is current rev
-  leaves.shift();
-  return leaves.map(function(x) { return x.rev; });
+
+// for every node in a revision tree computes its distance from the closest
+// leaf
+var computeHeight = function(revs) {
+  var height = {};
+  var edges = [];
+  traverseRevTree(revs, function(isLeaf, pos, id, prnt) {
+    var rev = pos + "-" + id;
+    if (isLeaf) {
+      height[rev] = 0;
+    }
+    if (prnt !== undefined) {
+      edges.push({from: prnt, to: rev});
+    }
+    return rev;
+  });
+  edges.reverse();
+  edges.forEach(function(edge) {
+    if (height[edge.from] === undefined) {
+      height[edge.from] = 1 + height[edge.to];
+    } else {
+      height[edge.from] = Math.min(height[edge.from], 1 + height[edge.to]);
+    }
+  });
+  return height;
 };
 
 // returns first element of arr satisfying callback predicate
@@ -286,31 +314,9 @@ var rootToLeaf = function(tree) {
   return paths;
 };
 
-// Basic wrapper for localStorage
-var win = this;
-var localJSON = (function(){
-  if (!win.localStorage) {
-    return false;
-  }
-  return {
-    set: function(prop, val) {
-      localStorage.setItem(prop, JSON.stringify(val));
-    },
-    get: function(prop, def) {
-      try {
-        if (localStorage.getItem(prop) === null) {
-          return def;
-        }
-        return JSON.parse((localStorage.getItem(prop) || 'false'));
-      } catch(err) {
-        return def;
-      }
-    },
-    remove: function(prop) {
-      localStorage.removeItem(prop);
-    }
-  };
-})();
+var isChromeApp = function(){
+  return (typeof chrome !== "undefined" && typeof chrome.storage !== "undefined" && typeof chrome.storage.local !== "undefined");
+};
 
 if (typeof module !== 'undefined' && module.exports) {
   // use node.js's crypto library instead of the Crypto object created by deps/uuid.js
@@ -340,6 +346,7 @@ if (typeof module !== 'undefined' && module.exports) {
     collectRevs: collectRevs,
     collectLeaves: collectLeaves,
     collectConflicts: collectConflicts,
+    computeHeight: computeHeight,
     arrayFirst: arrayFirst,
     filterChange: filterChange,
     atob: function(str) {
@@ -351,7 +358,8 @@ if (typeof module !== 'undefined' && module.exports) {
     extend: extend,
     ajax: ajax,
     traverseRevTree: traverseRevTree,
-    rootToLeaf: rootToLeaf
+    rootToLeaf: rootToLeaf,
+    isChromeApp: isChromeApp
   };
 }
 
@@ -360,9 +368,16 @@ var Changes = function() {
   var api = {};
   var listeners = {};
 
-  window.addEventListener("storage", function(e) {
-    api.notify(e.key);
-  });
+  if (isChromeApp()){
+    chrome.storage.onChanged.addListener(function(e){
+      api.notify(e.db_name.newValue);//object only has oldValue, newValue members
+    });
+  }
+  else {
+    window.addEventListener("storage", function(e) {
+      api.notify(e.key);
+    });
+  }
 
   api.addListener = function(db_name, id, db, opts) {
     if (!listeners[db_name]) {
@@ -380,6 +395,16 @@ var Changes = function() {
 
   api.clearListeners = function(db_name) {
     delete listeners[db_name];
+  };
+
+  api.notifyLocalWindows = function(db_name){
+    //do a useless change on a storage thing
+    //in order to get other windows's listeners to activate
+    if (!isChromeApp()){
+      localStorage[db_name] = (localStorage[db_name] === "a") ? "b" : "a";
+    } else {
+      chrome.storage.local.set({db_name: db_name});
+    }
   };
 
   api.notify = function(db_name) {
