@@ -582,6 +582,11 @@ var HttpPouch = function(opts, callback) {
       params.push('endkey=' + encodeURIComponent(JSON.stringify(opts.endkey)));
     }
 
+    // If opts.limit exists, add the limit value to the parameter list.
+    if (opts.limit) {
+      params.push('limit=' + opts.limit);
+    }
+
     // Format the list of parameters into a valid URI query string
     params = params.join('&');
     if (params !== '') {
@@ -644,6 +649,10 @@ var HttpPouch = function(opts, callback) {
     // http://wiki.apache.org/couchdb/HTTP_database_API#Changes
     if (opts.conflicts) {
       params.push('conflicts=true');
+    }
+
+    if (opts.limit || opts.limit === 0) {
+      params.push('limit=' + opts.limit);
     }
 
     // If opts.descending exists, add the descending value to the query string.
@@ -711,10 +720,15 @@ var HttpPouch = function(opts, callback) {
         // For each change
         res.results.forEach(function(c) {
           var hasFilter = opts.filter && typeof opts.filter === 'function';
-          if (opts.aborted || hasFilter && !opts.filter.apply(this, [c.doc])) {
+          var req = {};
+          req.query = opts.query_params;
+          if (opts.aborted || hasFilter && !opts.filter.apply(this, [c.doc, req])) {
             return;
           }
 
+          if (opts.doc_ids && opts.doc_ids.indexOf(c.id) !== -1) {
+            return;
+          }
           // Process the change
           call(opts.onChange, c);
         });

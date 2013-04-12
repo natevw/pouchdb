@@ -1,6 +1,7 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
 /*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
 /*globals ajax: true, LevelPouch: true */
+/*globals cleanupTestDatabases: false */
 
 "use strict";
 
@@ -26,12 +27,9 @@ adapters.map(function(adapter) {
   QUnit.module("changes: " + adapter, {
     setup : function () {
       this.name = generateAdapterUrl(adapter);
+      Pouch.enableAllDbs = true;
     },
-    teardown: function() {
-      if (!PERSIST_DATABASES) {
-        Pouch.destroy(this.name);
-      }
-    }
+    teardown: cleanupTestDatabases
   });
 
   asyncTest("All changes", function () {
@@ -61,6 +59,47 @@ adapters.map(function(adapter) {
           since: 2,
           complete: function(err, results) {
             equal(results.results.length, 2, 'Partial results');
+            start();
+          }
+        });
+      });
+    });
+  });
+
+  asyncTest("Changes Since and limit", function () {
+      var docs = [
+      {_id: "0", integer: 0},
+      {_id: "1", integer: 1},
+      {_id: "2", integer: 2},
+      {_id: "3", integer: 3}
+    ];
+    initTestDB(this.name, function(err, db) {
+      db.bulkDocs({docs: docs}, function(err, info) {
+        db.changes({
+          since: 2,
+          limit: 1,
+          complete: function(err, results) {
+            equal(results.results.length, 1, 'Partial results');
+            start();
+          }
+        });
+      });
+    });
+  });
+
+  asyncTest("Changes limit = 0", function () {
+      var docs = [
+      {_id: "0", integer: 0},
+      {_id: "1", integer: 1},
+      {_id: "2", integer: 2},
+      {_id: "3", integer: 3}
+    ];
+    initTestDB(this.name, function(err, db) {
+      db.bulkDocs({docs: docs}, function(err, info) {
+        db.changes({
+          limit: 0,
+          complete: function(err, results) {
+            equal(results.results.length, 1, 'Partial results');
             start();
           }
         });
@@ -265,6 +304,51 @@ adapters.map(function(adapter) {
     });
   });
 
+  asyncTest("Changes filter with query params", function() {
+
+    var docs1 = [
+      {_id: "0", integer: 0},
+      {_id: "1", integer: 1},
+      {_id: "2", integer: 2},
+      {_id: "3", integer: 3}
+    ];
+
+    var docs2 = [
+      {_id: "4", integer: 4},
+      {_id: "5", integer: 5},
+      {_id: "6", integer: 6},
+      {_id: "7", integer: 7}
+    ];
+
+    var params = {
+      "abc": true
+    };
+
+    initTestDB(this.name, function(err, db) {
+      var count = 0;
+      db.bulkDocs({docs: docs1}, function(err, info) {
+        var changes = db.changes({
+          filter: function(doc, req) {
+            if (req.query.abc) {
+              return doc.integer % 2 === 0;
+            }
+          },
+          query_params: params,
+          onChange: function(change) {
+            count += 1;
+            if (count === 4) {
+              ok(true, 'We got all the docs');
+              changes.cancel();
+              start();
+            }
+          },
+          continuous: true
+        });
+        db.bulkDocs({docs: docs2});
+      });
+    });
+  });
+
   asyncTest("Changes to same doc are grouped", function() {
     var docs1 = [
       {_id: "0", integer: 0},
@@ -320,7 +404,6 @@ adapters.map(function(adapter) {
     var localname = this.name, remotename = this.name + "-remote";
 
     initDBPair(localname, remotename, function(localdb, remotedb) {
-
       localdb.bulkDocs({docs: docs1}, function(err, info) {
         docs2[0]._rev = info[2].rev;
         var rev1 = docs2[1]._rev = info[3].rev;
@@ -328,7 +411,8 @@ adapters.map(function(adapter) {
           localdb.put(docs2[1], function(err, info) {
             var rev2 = info.rev;
             Pouch.replicate(localdb, remotedb, function(err, done) {
-              // update remote once, local twice, then replicate from remote to local so the remote losing conflict is later in the tree
+              // update remote once, local twice, then replicate from
+              // remote to local so the remote losing conflict is later in the tree
               localdb.put({_id: "3", _rev: rev2, integer: 20}, function(err, resp) {
                 var rev3local = resp.rev;
                 localdb.put({_id: "3", _rev: rev3local, integer: 30}, function(err, resp) {

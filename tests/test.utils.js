@@ -1,7 +1,72 @@
-/*globals extend: false, Buffer: false */
+/*globals extend: false, Buffer: false, Pouch: true */
 "use strict";
 
-var PERSIST_DATABASES = true;
+var PERSIST_DATABASES = false;
+
+function cleanupAllDbs() {
+
+  var deleted = 0;
+  var adapters = Object.keys(Pouch.adapters).filter(function(adapter) {
+    return adapter !== 'http' && adapter !== 'https';
+  });
+
+  function finished() {
+    // Restart text execution
+    start();
+  }
+
+  function dbDeleted() {
+    deleted++;
+    if (deleted === adapters.length) {
+      finished();
+    }
+  }
+
+  if (!adapters.length) {
+    finished();
+  }
+
+  // Remove old allDbs to prevent DOM exception
+  adapters.forEach(function(adapter) {
+    if (adapter === "http" || adapter === "https") {
+      return;
+    }
+    Pouch.destroy(Pouch.allDBName(adapter), dbDeleted);
+  });
+}
+
+function cleanupTestDatabases() {
+
+  if (PERSIST_DATABASES) {
+    return;
+  }
+
+  // Stop the tests from executing
+  stop();
+
+  var dbCount;
+  var deleted = 0;
+
+  function finished() {
+    cleanupAllDbs();
+  }
+
+  function dbDeleted() {
+    if (++deleted === dbCount) {
+      finished();
+    }
+  }
+
+  Pouch.allDbs(function(err, dbs) {
+    if (!dbs.length) {
+      finished();
+    }
+    dbCount = dbs.length;
+    dbs.forEach(function(db) {
+      Pouch.destroy(db, dbDeleted);
+    });
+  });
+}
 
 function uuid() {
   var S4 = function() {
@@ -115,7 +180,7 @@ function generateAdapterUrl(id) {
 }
 
 // Put doc after prevRev (so that doc is a child of prevDoc
-// in rev_tree). Doc must have _rev. If prevRev is not specified 
+// in rev_tree). Doc must have _rev. If prevRev is not specified
 // just insert doc with correct _rev (new_edits=false!)
 function putAfter(db, doc, prevRev, callback){
   var newDoc = extend({}, doc);
@@ -148,7 +213,7 @@ var putBranch = function(db, docs, callback) {
     }
     db.get(doc._id, {rev: doc._rev}, function(err, ok){
       if(err){
-        putAfter(db, docs[i], prev, function() {
+        putAfter(db, docs[i], prev, function(err, doc) {
           next();
         });
       }else{
@@ -174,7 +239,6 @@ var putTree = function(db, tree, callback) {
   insert(0);
 };
 
-
 if (typeof module !== 'undefined' && module.exports) {
   Pouch = require('../src/pouch.js');
   module.exports = {
@@ -190,6 +254,7 @@ if (typeof module !== 'undefined' && module.exports) {
     putAfter: putAfter,
     putBranch: putBranch,
     putTree: putTree,
+    cleanupTestDatabases: cleanupTestDatabases,
     PERSIST_DATABASES: PERSIST_DATABASES
   };
 }

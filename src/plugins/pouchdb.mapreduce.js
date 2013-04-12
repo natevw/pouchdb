@@ -39,11 +39,12 @@ var MapReduce = function(db) {
         id: current.doc._id,
         key: key,
         value: val
-      }; 
+      };
 
       if (options.startkey && Pouch.collate(key, options.startkey) < 0) return;
       if (options.endkey && Pouch.collate(key, options.endkey) > 0) return;
       if (options.key && Pouch.collate(key, options.key) !== 0) return;
+
       num_started++;
       if (options.include_docs) {
         //in this special case, join on _id (issue #106)
@@ -71,10 +72,6 @@ var MapReduce = function(db) {
       eval('fun.reduce = ' + fun.reduce.toString() + ';');
     }
 
-    // exclude  _conflicts key by default
-    // or to use options.conflicts if it's set when called by db.query
-    var conflicts = ('conflicts' in options ? options.conflicts : false);
-
     //only proceed once all documents are mapped and joined
     var checkComplete= function(){
       if (completed && results.length == num_started){
@@ -85,7 +82,12 @@ var MapReduce = function(db) {
           results.reverse();
         }
         if (options.reduce === false) {
-          return options.complete(null, {rows: results});
+          return options.complete(null, {
+            rows: ('limit' in options)
+              ? results.slice(0, options.limit)
+              : results,
+            total_rows: results.length
+          });
         }
 
         var groups = [];
@@ -102,12 +104,17 @@ var MapReduce = function(db) {
           e.value = fun.reduce(e.key, e.value) || null;
           e.key = e.key[0][0];
         });
-        options.complete(null, {rows: groups});
+        options.complete(null, {
+          rows: ('limit' in options)
+            ? groups.slice(0, options.limit)
+            : groups,
+          total_rows: groups.length
+        });
       }
     }
 
     db.changes({
-      conflicts: conflicts,
+      conflicts: true,
       include_docs: true,
       onChange: function(doc) {
         if (!('deleted' in doc)) {

@@ -1,6 +1,7 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
 /*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
 /*globals ajax: true, LevelPouch: true, makeDocs: false */
+/*globals cleanupTestDatabases: false */
 
 "use strict";
 
@@ -27,12 +28,9 @@ adapters.map(function(adapter) {
   qunit('bulk_docs: ' + adapter, {
     setup : function () {
       this.name = generateAdapterUrl(adapter);
+      Pouch.enableAllDbs = true;
     },
-    teardown: function() {
-      if (!PERSIST_DATABASES) {
-        Pouch.destroy(this.name);
-      }
-    }
+    teardown: cleanupTestDatabases
   });
 
   var authors = [
@@ -180,6 +178,17 @@ adapters.map(function(adapter) {
         db.get("foo", {open_revs: "all"}, function(err, res){
           ok(res[0].ok._rev === "2-x", "doc1 ok");
           ok(res[1].ok._rev === "2-y", "doc2 ok");
+          start();
+        });
+      });
+    });
+  });
+
+  asyncTest('656 regression in handling deleted docs', function() {
+    initTestDB(this.name, function(err, db) {
+      db.bulkDocs({docs: [{_id: "foo", _rev: "1-a", _deleted: true}]}, {new_edits: false}, function(err, res){
+        db.get("foo", function(err, res){
+          ok(err, "deleted");
           start();
         });
       });

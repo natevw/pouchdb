@@ -1,5 +1,6 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
 /*globals PERSIST_DATABASES: false, initDBPair: false, openTestDB: false, putAfter: false */
+/*globals cleanupTestDatabases: false, strictEqual: false */
 
 "use strict";
 
@@ -33,13 +34,9 @@ adapters.map(function(adapters) {
     setup : function () {
       this.name = generateAdapterUrl(adapters[0]);
       this.remote = generateAdapterUrl(adapters[1]);
+      Pouch.enableAllDbs = true;
     },
-    teardown: function() {
-      if (!PERSIST_DATABASES) {
-        Pouch.destroy(this.name);
-        Pouch.destroy(this.remote);
-      }
-    }
+    teardown: cleanupTestDatabases
   });
 
   var docs = [
@@ -450,6 +447,26 @@ adapters.map(function(adapters) {
     });
   });
 
+  asyncTest("Replication doc ids", function() {
+    console.info('Starting Test: Replication with doc_ids');
+    var thedocs = [
+      {_id: '3', integer: 3, string: '3'},
+      {_id: '4', integer: 4, string: '4'},
+      {_id: '5', integer: 5, string: '5'}
+    ];
+
+    initDBPair(this.name, this.remote, function(db, remote) {
+      remote.bulkDocs({docs: thedocs}, function(err, info) {
+        db.replicate.from(remote, {
+          doc_ids: ['3', '4']
+        }, function(err, response){
+          strictEqual(response.docs_written, 1, 'correct # of docs replicated');
+          start();
+        });
+      });
+    });
+  });
+
   asyncTest("Replication with same filters", function() {
     console.info('Starting Test: Replication with same filters');
     var more_docs = [
@@ -682,6 +699,26 @@ deletedDocAdapters.map(function(adapters) {
           });
         });
       });
+    });
+  });
+
+  asyncTest("issue #585 Store checkpoint on target db.", function() {
+    console.info('Starting Test: Local DB contains documents');
+    var docs = [{_id: "a"}, {_id: "b"}];
+    var self = this;
+    initDBPair(this.name, this.remote, function(db, remote) {
+        db.bulkDocs({docs: docs}, {}, function(err, _) {
+          db.replicate.to(self.remote, function(err, result) {
+            ok(result.docs_written === docs.length, 'docs replicated ok');
+            Pouch.destroy(self.remote, function (err, result) {
+              ok(result.ok === true, 'remote was deleted');
+              db.replicate.to(self.remote, function (err, result) {
+                ok(result.docs_written === docs.length, 'docs were written again because target was deleted.');
+                start();
+              });
+            });
+          });
+        });
     });
   });
 });

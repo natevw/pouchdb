@@ -1,10 +1,13 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
 /*globals PERSIST_DATABASES: false, initDBPair: false, utils: true, putTree: false */
-/*globals ajax: true, LevelPouch: true, makeDocs: false */
+/*globals ajax: true, LevelPouch: true, makeDocs: false, strictEqual: false */
+/*globals cleanupTestDatabases: false */
 
 "use strict";
 
-var adapters = ['local-1'];
+var adapters = ['local-1', 'http-1'];
+var autoCompactionAdapters = ['local-1'];
+
 var qunit = module;
 var LevelPouch;
 
@@ -25,12 +28,9 @@ adapters.map(function(adapter) {
   qunit('compaction: ' + adapter, {
     setup : function () {
       this.name = generateAdapterUrl(adapter);
+      Pouch.enableAllDbs = true;
     },
-    teardown: function() {
-      if (!PERSIST_DATABASES) {
-        Pouch.destroy(this.name);
-      }
-    }
+    teardown: cleanupTestDatabases
   });
 
   asyncTest('Compation document with no revisions to remove', function() {
@@ -196,27 +196,46 @@ adapters.map(function(adapter) {
     });
   });
 
-  asyncTest('Auto-compaction test', function() {
-    initTestDB(this.name, {auto_compaction: true}, function(err, db) {
-      var doc = {_id: "doc", val: "1"};
-      db.post(doc, function(err, res) {
-        var rev1 = res.rev;
-        doc._rev = rev1;
-        doc.val = "2";
+  asyncTest('Compact deleted document', function() {
+    initTestDB(this.name, function(err, db) {
+      db.put({_id: "foo"}, function(err, res) {
+        var firstRev = res.rev;
+        db.remove({_id: "foo", _rev: firstRev}, function(err, res) {
+          db.compact(function() {
+            db.get("foo", {rev: firstRev}, function(err, res) {
+              ok(err, "got error");
+              strictEqual(err.reason, "missing", "correct reason");
+              start();
+            });
+          });
+        });
+      });
+    });
+  });
+
+  if (autoCompactionAdapters.indexOf(adapter) > -1) {
+    asyncTest('Auto-compaction test', function() {
+      initTestDB(this.name, {auto_compaction: true}, function(err, db) {
+        var doc = {_id: "doc", val: "1"};
         db.post(doc, function(err, res) {
-          var rev2 = res.rev;
-          doc._rev = rev2;
-          doc.val = "3";
+          var rev1 = res.rev;
+          doc._rev = rev1;
+          doc.val = "2";
           db.post(doc, function(err, res) {
-            var rev3 = res.rev;
-            db.get("doc", {rev: rev1}, function(err, doc) {
-              ok(err.status === 404 && err.error === "not_found", 
-                "compacted document is missing");
-              db.get("doc", {rev: rev2}, function(err, doc) { 
-                ok(!err, "leaf's parent does not get compacted");
-                db.get("doc", {rev: rev3}, function(err, doc) {
-                  ok(!err, "leaf revision does not get compacted");
-                  start();
+            var rev2 = res.rev;
+            doc._rev = rev2;
+            doc.val = "3";
+            db.post(doc, function(err, res) {
+              var rev3 = res.rev;
+              db.get("doc", {rev: rev1}, function(err, doc) {
+                strictEqual(err.status, 404, "compacted document is missing");
+                strictEqual(err.error, "not_found", "compacted document is missing");
+                db.get("doc", {rev: rev2}, function(err, doc) {
+                  ok(!err, "leaf's parent does not get compacted");
+                  db.get("doc", {rev: rev3}, function(err, doc) {
+                    ok(!err, "leaf revision does not get compacted");
+                    start();
+                  });
                 });
               });
             });
@@ -224,5 +243,5 @@ adapters.map(function(adapter) {
         });
       });
     });
-  });
+  }
 });

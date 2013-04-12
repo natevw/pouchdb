@@ -81,8 +81,9 @@ Pouch.DEBUG = false;
 Pouch.adapters = {};
 Pouch.plugins = {};
 
-Pouch.parseAdapter = function(name) {
+Pouch.prefix = '_pouch_';
 
+Pouch.parseAdapter = function(name) {
   var match = name.match(/([a-z\-]*):\/\/(.*)/);
   if (match) {
     // the http adapter expects the fully qualified name
@@ -98,7 +99,7 @@ Pouch.parseAdapter = function(name) {
   for (var i = 0; i < preferredAdapters.length; ++i) {
     if (preferredAdapters[i] in Pouch.adapters) {
       return {
-        name: name,
+        name: Pouch.prefix + name,
         adapter: preferredAdapters[i]
       };
     }
@@ -126,35 +127,48 @@ Pouch.destroy = function(name, callback) {
     Pouch.adapters[opts.adapter].destroy(opts.name, callback);
   };
 
+  // remove Pouch from allDBs
+  Pouch.removeFromAllDbs(opts, cb);
+};
+
+Pouch.removeFromAllDbs = function(opts, callback) {
+  // Only execute function if flag is enabled
+  if (!Pouch.enableAllDbs) {
+    callback();
+    return;
+  }
+
   // skip http and https adaptors for allDbs
   var adapter = opts.adapter;
   if (adapter === "http" || adapter === "https") {
-    cb();
+    callback();
     return;
   }
 
   // remove db from Pouch.ALL_DBS
   new Pouch(Pouch.allDBName(opts.adapter), function(err, db) {
     if (err) {
-      callback(err);
+      // don't fail when allDbs fail
+      console.error(err);
+      callback();
       return;
     }
     // check if db has been registered in Pouch.ALL_DBS
     var dbname = Pouch.dbName(opts.adapter, opts.name);
     db.get(dbname, function(err, doc) {
       if (err) {
-        if (err.status === 404) {
-          cb();
-        } else {
-          cb(err);
-        }
+        callback();
       } else {
         db.remove(doc, function(err, response) {
-            cb(err);
+          if (err) {
+            console.error(err);
+          }
+          callback();
         });
       }
     });
   });
+
 };
 
 Pouch.adapter = function (id, obj) {
@@ -167,6 +181,9 @@ Pouch.plugin = function(id, obj) {
   Pouch.plugins[id] = obj;
 };
 
+// flag to toggle allDbs (off by default)
+Pouch.enableAllDbs = false;
+
 // name of database used to keep track of databases
 Pouch.ALL_DBS = "_allDbs";
 Pouch.dbName = function(adapter, name) {
@@ -176,10 +193,16 @@ Pouch.realDBName = function(adapter, name) {
   return [adapter, "://", name].join('');
 };
 Pouch.allDBName = function(adapter) {
-  return [adapter, "://", Pouch.ALL_DBS].join('');
+  return [adapter, "://", Pouch.prefix + Pouch.ALL_DBS].join('');
 };
 
 Pouch.open = function(opts, callback) {
+  // Only register pouch with allDbs if flag is enabled
+  if (!Pouch.enableAllDbs) {
+    callback();
+    return;
+  }
+
   var adapter = opts.adapter;
   // skip http and https adaptors for allDbs
   if (adapter === "http" || adapter === "https") {
@@ -189,22 +212,26 @@ Pouch.open = function(opts, callback) {
 
   new Pouch(Pouch.allDBName(adapter), function(err, db) {
     if (err) {
-      callback(err);
+      // don't fail when allDb registration fails
+      console.error(err);
+      callback();
       return;
     }
 
     // check if db has been registered in Pouch.ALL_DBS
     var dbname = Pouch.dbName(adapter, opts.name);
     db.get(dbname, function(err, response) {
-      if (err) {
-        if (err.status === 404) {
-          db.put({
-            _id: dbname,
-            dbname: opts.originalName 
-          }, callback);
-        } else {
-          callback(err);
-        }
+      if (err && err.status === 404) {
+        db.put({
+          _id: dbname,
+          dbname: opts.originalName
+        }, function(err) {
+            if (err) {
+                console.error(err);
+            }
+
+            callback();
+        });
       } else {
         callback();
       }

@@ -1,6 +1,5 @@
 /*globals call: false, extend: false, parseDoc: false, Crypto: false */
-/*globals isLocalId: false, isDeleted: false, collectConflicts: false */
-/*globals collectLeaves: false, Changes: false */
+/*globals isLocalId: false, isDeleted: false, Changes: false, filterChange: false */
 
 'use strict';
 
@@ -78,10 +77,18 @@ var IdbPouch = function(opts, callback) {
     console.log(name + ': Open Database');
   }
 
-  // TODO: before we release, make sure we write upgrade needed
-  // in a way that supports a future upgrade path
   req.onupgradeneeded = function(e) {
     var db = e.target.result;
+    var currentVersion = e.oldVersion;
+    while (currentVersion !== e.newVersion) {
+      if (currentVersion === 0) {
+        createSchema(db);
+      }
+      currentVersion++;
+    }
+  };
+
+  function createSchema(db) {
     db.createObjectStore(DOC_STORE, {keyPath : 'id'})
       .createIndex('seq', 'seq', {unique: true});
     db.createObjectStore(BY_SEQ_STORE, {autoIncrement : true})
@@ -89,7 +96,7 @@ var IdbPouch = function(opts, callback) {
     db.createObjectStore(ATTACH_STORE, {keyPath: 'digest'});
     db.createObjectStore(META_STORE, {keyPath: 'id', autoIncrement: false});
     db.createObjectStore(DETECT_BLOB_SUPPORT_STORE);
-  };
+  }
 
   req.onsuccess = function(e) {
 
@@ -160,7 +167,6 @@ var IdbPouch = function(opts, callback) {
   };
 
   api._bulkDocs = function idb_bulkDocs(req, opts, callback) {
-
     var newEdits = opts.new_edits;
     var userDocs = req.docs;
 
@@ -168,12 +174,6 @@ var IdbPouch = function(opts, callback) {
     var docInfos = userDocs.map(function(doc, i) {
       var newDoc = parseDoc(doc, newEdits);
       newDoc._bulk_seq = i;
-      if (doc._deleted) {
-        if (!newDoc.metadata.deletions) {
-          newDoc.metadata.deletions = {};
-        }
-        newDoc.metadata.deletions[doc._rev.split('-')[1]] = true;
-      }
       return newDoc;
     });
 
@@ -371,12 +371,10 @@ var IdbPouch = function(opts, callback) {
     }
 
     function updateDoc(oldDoc, docInfo) {
-      docInfo.metadata.deletions = extend(docInfo.metadata.deletions, oldDoc.deletions);
-
       var merged = Pouch.merge(oldDoc.rev_tree, docInfo.metadata.rev_tree[0], 1000);
-
-      var inConflict = (isDeleted(oldDoc) && isDeleted(docInfo.metadata)) ||
-        (!isDeleted(oldDoc) && newEdits && merged.conflicts !== 'new_leaf');
+      var wasPreviouslyDeleted = isDeleted(oldDoc);
+      var inConflict = (wasPreviouslyDeleted && isDeleted(docInfo.metadata)) ||
+        (!wasPreviouslyDeleted && newEdits && merged.conflicts !== 'new_leaf');
 
       if (inConflict) {
         results.push(makeErr(Pouch.Errors.REV_CONFLICT, docInfo._bulk_seq));
@@ -583,7 +581,7 @@ var IdbPouch = function(opts, callback) {
       }
       call(callback, null, {
         total_rows: results.length,
-        rows: results
+        rows: ('limit' in opts) ? results.slice(0, opts.limit) : results
       });
     };
 
@@ -619,7 +617,8 @@ var IdbPouch = function(opts, callback) {
               delete(doc.doc._doc_id_rev);
           }
           if (opts.conflicts) {
-            doc.doc._conflicts = collectConflicts(metadata);
+            doc.doc._conflicts = Pouch.merge.collectConflicts(metadata)
+              .map(function(x) { return x.id; });
           }
         }
         if ('keys' in opts) {
@@ -716,11 +715,23 @@ var IdbPouch = function(opts, callback) {
     function fetchChanges() {
       txn = idb.transaction([DOC_STORE, BY_SEQ_STORE]);
       txn.oncomplete = onTxnComplete;
-      var req = descending ?
-        txn.objectStore(BY_SEQ_STORE)
-          .openCursor(IDBKeyRange.lowerBound(opts.since, true), descending) :
-        txn.objectStore(BY_SEQ_STORE)
-          .openCursor(IDBKeyRange.lowerBound(opts.since, true));
+
+      var req;
+
+      if (opts.limit && descending) {
+        req = txn.objectStore(BY_SEQ_STORE)
+            .openCursor(IDBKeyRange.bound(opts.since, opts.since + opts.limit, true), descending);
+      } else if (opts.limit && !descending) {
+        req = txn.objectStore(BY_SEQ_STORE)
+            .openCursor(IDBKeyRange.bound(opts.since, opts.since + opts.limit, true));
+      } else if (descending) {
+        req = txn.objectStore(BY_SEQ_STORE)
+            .openCursor(IDBKeyRange.lowerBound(opts.since, true), descending);
+      } else {
+        req = txn.objectStore(BY_SEQ_STORE)
+            .openCursor(IDBKeyRange.lowerBound(opts.since, true));
+      }
+
       req.onsuccess = onsuccess;
       req.onerror = onerror;
     }
@@ -753,9 +764,11 @@ var IdbPouch = function(opts, callback) {
       var cursor = event.target.result;
 
       // Try to pre-emptively dedup to save us a bunch of idb calls
-      var changeId = cursor.value._id, changeIdIndex = resultIndices[changeId];
+      var changeId = cursor.value._id;
+      var changeIdIndex = resultIndices[changeId];
       if (changeIdIndex !== undefined) {
-        results[changeIdIndex].seq = cursor.key; // update so it has the later sequence number
+        results[changeIdIndex].seq = cursor.key;
+        // update so it has the later sequence number
         results.push(results[changeIdIndex]);
         results[changeIdIndex] = null;
         resultIndices[changeId] = results.length - 1;
@@ -776,8 +789,8 @@ var IdbPouch = function(opts, callback) {
           var doc = docevent.target.result;
           var changeList = [{rev: mainRev}];
           if (opts.style === 'all_docs') {
-          //  console.log('all docs', changeList, collectLeaves(metadata.rev_tree));
-            changeList = collectLeaves(metadata.rev_tree);
+            changeList = Pouch.merge.collectLeaves(metadata.rev_tree)
+              .map(function(x) { return {rev: x.rev}; });
           }
           var change = {
             id: metadata.id,
@@ -785,11 +798,13 @@ var IdbPouch = function(opts, callback) {
             changes: changeList,
             doc: doc
           };
+
           if (isDeleted(metadata, mainRev)) {
             change.deleted = true;
           }
           if (opts.conflicts) {
-            change.doc._conflicts = collectConflicts(metadata);
+            change.doc._conflicts = Pouch.merge.collectConflicts(metadata)
+              .map(function(x) { return x.id; });
           }
 
           // Dedupe the changes feed
@@ -805,15 +820,7 @@ var IdbPouch = function(opts, callback) {
     }
 
     function onTxnComplete() {
-      dedupResults.map(function(c) {
-        if (opts.filter && !opts.filter.apply(this, [c.doc])) {
-          return;
-        }
-        if (!opts.include_docs) {
-          delete c.doc;
-        }
-        call(opts.onChange, c);
-      });
+      dedupResults.map(filterChange(opts));
       call(opts.complete, null, {results: dedupResults});
     }
 
@@ -834,7 +841,6 @@ var IdbPouch = function(opts, callback) {
     call(callback, null);
   };
 
-  // compaction internal functions
   api._getRevisionTree = function(docId, callback) {
     var txn = idb.transaction([DOC_STORE], 'readonly');
     var req = txn.objectStore(DOC_STORE).get(docId);
@@ -848,24 +854,39 @@ var IdbPouch = function(opts, callback) {
     };
   };
 
-  api._removeDocRevisions = function(docId, revs, callback) {
-    var txn = idb.transaction([BY_SEQ_STORE], IDBTransaction.READ_WRITE);
-    var index = txn.objectStore(BY_SEQ_STORE).index('_doc_id_rev');
-    revs.forEach(function(rev) {
-      var key = docId + "::" + rev;
-      index.getKey(key).onsuccess = function(e) {
-        var seq = e.target.result;
-        if (!seq) {
-          return;
-        }
-        var req = txn.objectStore(BY_SEQ_STORE)['delete'](seq);
-      };
-    });
+  // This function removes revisions of document docId
+  // which are listed in revs and sets this document 
+  // revision to to rev_tree
+  api._doCompaction = function(docId, rev_tree, revs, callback) {
+    var txn = idb.transaction([DOC_STORE, BY_SEQ_STORE], IDBTransaction.READ_WRITE);
+
+    var index = txn.objectStore(DOC_STORE);
+    index.get(docId).onsuccess = function(event) {
+      var metadata = event.target.result;
+      metadata.rev_tree = rev_tree;
+
+      var count = revs.length;
+      revs.forEach(function(rev) {
+        var index = txn.objectStore(BY_SEQ_STORE).index('_doc_id_rev');
+        var key = docId + "::" + rev;
+        index.getKey(key).onsuccess = function(e) {
+          var seq = e.target.result;
+          if (!seq) {
+            return;
+          }
+          var req = txn.objectStore(BY_SEQ_STORE)['delete'](seq);
+
+          count--;
+          if (!count) {
+            txn.objectStore(DOC_STORE).put(metadata);
+          }
+        };
+      });
+    };
     txn.oncomplete = function() {
-      callback();
+      call(callback);
     };
   };
-  // end of compaction internal functions
 
   return api;
 };

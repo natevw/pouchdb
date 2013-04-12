@@ -157,7 +157,7 @@ var LevelPouch = function(opts, callback) {
 
   api._info = function(callback) {
     return call(callback, null, {
-      name: opts.name,
+      db_name: opts.name,
       doc_count: doc_count,
       update_seq: update_seq
     });
@@ -263,13 +263,6 @@ var LevelPouch = function(opts, callback) {
       if (newDoc.metadata && !newDoc.metadata.rev_map) {
         newDoc.metadata.rev_map = {};
       }
-      if (doc._deleted) {
-        if (!newDoc.metadata.deletions) {
-          newDoc.metadata.deletions = {};
-        }
-        newDoc.metadata.deletions[doc._rev.split('-')[1]] = true;
-      }
-
       return newDoc;
     });
 
@@ -325,8 +318,6 @@ var LevelPouch = function(opts, callback) {
     }
 
     function updateDoc(oldDoc, docInfo, callback) {
-      docInfo.metadata.deletions = extend(docInfo.metadata.deletions, oldDoc.deletions);
-
       var merged = Pouch.merge(oldDoc.rev_tree, docInfo.metadata.rev_tree[0], 1000);
 
       var conflict = (isDeleted(oldDoc) && isDeleted(docInfo.metadata)) ||
@@ -491,7 +482,7 @@ var LevelPouch = function(opts, callback) {
         var change = {
           id: metadata.id,
           seq: metadata.seq,
-          changes: Pouch.utils.collectLeaves(metadata.rev_tree),
+          changes: Pouch.merge.collectLeaves(metadata.rev_tree),
           doc: result.data
         };
         change.doc._rev = rev;
@@ -546,7 +537,7 @@ var LevelPouch = function(opts, callback) {
           doc.doc = data;
           doc.doc._rev = doc.value.rev;
           if (opts.conflicts) {
-            doc.doc._conflicts = Pouch.utils.collectConflicts(metadata);
+            doc.doc._conflicts = Pouch.merge.collectConflicts(metadata);
           }
         }
         if ('keys' in opts) {
@@ -595,7 +586,7 @@ var LevelPouch = function(opts, callback) {
       }
       return call(callback, null, {
         total_rows: results.length,
-        rows: results
+        rows: ('limit' in opts) ? results.slice(0, opts.limit) : results
       });
     });
   };
@@ -615,6 +606,10 @@ var LevelPouch = function(opts, callback) {
         streamOpts.start = opts.since ? opts.since + 1 : 0;
       }
 
+      if (opts.limit) {
+        streamOpts.limit = opts.limit;
+      }
+
       var changeStream = stores[BY_SEQ_STORE].readStream(streamOpts);
       changeStream
         .on('data', function(data) {
@@ -630,24 +625,24 @@ var LevelPouch = function(opts, callback) {
             var change = {
               id: metadata.id,
               seq: metadata.seq,
-              changes: Pouch.utils.collectLeaves(metadata.rev_tree),
+              changes: Pouch.merge.collectLeaves(metadata.rev_tree)
+                .map(function(x) { return {rev: x.rev}; }),
               doc: data.value
             };
 
             change.doc._rev = Pouch.merge.winningRev(metadata);
 
-            if (isDeleted(metadata)) {
+           if (isDeleted(metadata)) {
               change.deleted = true;
             }
             if (opts.conflicts) {
-              change.doc._conflicts = Pouch.utils.collectConflicts(metadata);
+              change.doc._conflicts = Pouch.merge.collectConflicts(metadata);
             }
 
-            // dedupe changes (TODO: more efficient way to accomplish this?)
-            results = results.filter(function(doc) {
-              return doc.id !== change.id;
-            });
-            results.push(change);
+            // Ensure duplicated dont overwrite winning rev
+            if (+data.key === metadata.rev_map[change.doc._rev]) {
+              results.push(change);
+            }
           });
         })
         .on('error', function(err) {
@@ -729,7 +724,6 @@ var LevelPouch = function(opts, callback) {
     }
   };
 
-  // compaction internal functions
   api._getRevisionTree = function(docId, callback){
     stores[DOC_STORE].get(docId, function(err, metadata) {
       if (err) {
@@ -740,14 +734,12 @@ var LevelPouch = function(opts, callback) {
     });
   };
 
-  api._removeDocRevisions = function(docId, revs, callback) {
-    if (!revs.length) {
-      callback();
-    }
+  api._doCompaction = function(docId, rev_tree, revs, callback) {
     stores[DOC_STORE].get(docId, function(err, metadata) {
       var seqs = metadata.rev_map; // map from rev to seq
-      var count = revs.count;
+      metadata.rev_tree = rev_tree;
 
+      var count = revs.length;
       function done() {
         count--;
         if (!count) {
@@ -755,19 +747,25 @@ var LevelPouch = function(opts, callback) {
         }
       }
 
-      revs.forEach(function(rev) {
-        var seq = seqs[rev];
-        if (!seq) {
-          done();
-          return;
-        }
-        stores[BY_SEQ_STORE].del(seq, function(err) {
-          done();
+      if (!count) {
+        callback();
+      }
+
+      stores[DOC_STORE].put(metadata.id, metadata, function() {
+        revs.forEach(function(rev) {
+          var seq = seqs[rev];
+          if (!seq) {
+            done();
+            return;
+          }
+
+          stores[BY_SEQ_STORE].del(seq, function(err) {
+            done();
+          });
         });
       });
     });
   };
-  // end of compaction internal functions
 
   return api;
 };

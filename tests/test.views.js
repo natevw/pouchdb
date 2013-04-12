@@ -1,5 +1,6 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
-/*globals PERSIST_DATABASES: false */
+/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
+/*globals cleanupTestDatabases: false */
 
 "use strict";
 
@@ -25,12 +26,10 @@ adapters.map(function(adapter) {
   qunit('views: ' + adapter, {
     setup : function () {
       this.name = generateAdapterUrl(adapter);
+      this.remote = generateAdapterUrl('local-2');
+      Pouch.enableAllDbs = true;
     },
-    teardown: function() {
-      if (!PERSIST_DATABASES) {
-        Pouch.destroy(this.name);
-      }
-    }
+    teardown: cleanupTestDatabases
   });
 
   asyncTest("Test basic view", function() {
@@ -43,6 +42,7 @@ adapters.map(function(adapter) {
           db.remove(doc, function(_, resp) {
             db.query(queryFun, {include_docs: true, reduce: false}, function(_, res) {
               equal(res.rows.length, 1, 'Dont include deleted documents');
+              equal(res.total_rows, 1, 'Include total_rows property.');
               res.rows.forEach(function(x, i) {
                 ok(x.id, 'emitted row has id');
                 ok(x.key, 'emitted row has key');
@@ -205,7 +205,6 @@ adapters.map(function(adapter) {
           }
         };
         db.query(queryFun, {include_docs: true, reduce: false}, function(_, res) {
-          console.log(res);
           ok(res.rows[0].doc, 'doc included');
           equal(res.rows[0].doc._id, 'mydoc', 'mydoc included');
           start();
@@ -238,6 +237,53 @@ adapters.map(function(adapter) {
           expect(0);
           start();
         });
+      });
+    });
+  });
+
+
+  asyncTest('Views should include _conflicts', function() {
+    var self = this;
+    var doc1 = {_id: '1', foo: 'bar'};
+    var doc2 = {_id: '1', foo: 'baz'};
+    var queryFun = function(doc) { emit(doc._id, !!doc._conflicts); };
+    initDBPair(this.name, this.remote, function(db, remote) {
+      db.post(doc1, function(err, res) {
+        remote.post(doc2, function(err, res) {
+          db.replicate.from(remote, function(err, res) {
+            db.get(doc1._id, {conflicts: true}, function(err, res) {
+              ok(res._conflicts,'Conflict exists in db');
+              db.query(queryFun, function(err, res) {
+                ok(res.rows[0].value, 'Conflicts included.');
+                start();
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+
+  asyncTest("Test view querying with limit option", function() {
+    initTestDB(this.name, function(err, db) {
+      db.bulkDocs({
+        docs: [
+          { foo: 'bar' },
+          { foo: 'bar' },
+          { foo: 'baz' }
+        ]
+      }, null, function() {
+
+        db.query(function (doc) {
+          if (doc.foo === 'bar') {
+            emit(doc.foo);
+          }
+        }, { limit: 1 }, function (err, res) {
+          equal(res.total_rows, 2, 'Correctly returns total rows');
+          equal(res.rows.length, 1, 'Correctly limits returned rows');
+          start();
+        });
+
       });
     });
   });
