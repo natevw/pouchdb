@@ -70,6 +70,13 @@ adapters.map(function(adapter) {
     });
   });
 
+  asyncTest("Read db id", function() {
+    initTestDB(this.name, function(err, db) {
+      ok(typeof(db.id()) === 'string' && db.id() !== '', "got id");
+      start();
+    });
+  });
+
   asyncTest("Modify a doc with incorrect rev", 3, function() {
     initTestDB(this.name, function(err, db) {
       ok(!err, 'opened the pouch');
@@ -100,6 +107,21 @@ adapters.map(function(adapter) {
           db.get(info.id, function(err) {
             ok(err.error);
             start();
+          });
+        });
+      });
+    });
+  });
+
+  asyncTest("Doc removal leaves only stub", 1, function() {
+    initTestDB(this.name, function(err, db) {
+      db.put({_id: "foo", value: "test"}, function(err, res) {
+        db.get("foo", function(err, doc) {
+          db.remove(doc, function(err, res) {
+            db.get("foo", {rev: res.rev}, function(err, doc) {
+              deepEqual(doc, {_id: res.id, _rev: res.rev, _deleted: true}, "removal left only stub");
+              start();
+            });
           });
         });
       });

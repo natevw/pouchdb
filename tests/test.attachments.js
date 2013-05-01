@@ -1,7 +1,7 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
-/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
+/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true, strictEqual: false */
 /*globals ajax: true, LevelPouch: true, makeDocs: false */
-/*globals readBlob: false, makeBlob: false */
+/*globals readBlob: false, makeBlob: false, base64Blob: false */
 /*globals cleanupTestDatabases: false */
 
 "use strict";
@@ -68,6 +68,16 @@ adapters.map(function(adapter) {
     }
   };
 
+  var pngAttDoc = {
+    _id: "png_doc",
+    _attachments: {
+      "foo.png": {
+        content_type: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAMFBMVEX+9+j+9OD+7tL95rr93qT80YD7x2L6vkn6syz5qRT4ogT4nwD4ngD4nQD4nQD4nQDT2nT/AAAAcElEQVQY002OUQLEQARDw1D14f7X3TCdbfPnhQTqI5UqvGOWIz8gAIXFH9zmC63XRyTsOsCWk2A9Ga7wCXlA9m2S6G4JlVwQkpw/YmxrUgNoMoyxBwSMH/WnAzy5cnfLFu+dK2l5gMvuPGLGJd1/9AOiBQiEgkzOpgAAAABJRU5ErkJggg=="
+      }
+    }
+  };
+
   asyncTest("Test some attachments", function() {
     var db;
     initTestDB(this.name, function(err, _db) {
@@ -116,6 +126,35 @@ adapters.map(function(adapter) {
         });
       });
     }
+  });
+
+  asyncTest("Test getAttachment", function() {
+    initTestDB(this.name, function(err, db) {
+      db.put(binAttDoc, function(err, res) {
+        db.getAttachment("bin_doc/foo.txt", function(err, res) {
+          ok(!err, "Attachment read");
+          readBlob(res, function(data) {
+            strictEqual(data, "This is a base64 encoded text", "correct data");
+            start();
+          });
+        });
+      });
+    });
+  });
+
+  asyncTest("Test getAttachment with PNG", function() {
+    initTestDB(this.name, function(err, db) {
+      db.put(pngAttDoc, function(err, res) {
+        db.getAttachment("png_doc/foo.png", function(err, res) {
+          ok(!err, "Attachment read");
+          base64Blob(res, function(data) {
+            strictEqual(data, pngAttDoc._attachments['foo.png'].data,
+                        "correct data");
+            start();
+          });
+        });
+      });
+    });
   });
 
   asyncTest("Testing with invalid docs", function() {
@@ -303,6 +342,50 @@ adapters.map(function(adapter) {
       });
     });
   });
+
+  asyncTest("Try to insert a doc with unencoded attachment", function() {
+    initTestDB(this.name, function(err, db) {
+      var doc = {
+        _id: "foo",
+        _attachments: {
+          "foo.txt": {
+            content_type: "text/plain",
+            data: "this should have been encoded!"
+          }
+        }
+      };
+      db.put(doc, function(err, res) {
+        ok(err, "error returned");
+        strictEqual(err.status, 500, "correct error");
+        strictEqual(err.error, "badarg", "correct error");
+        start();
+      });
+    });
+  });
+
+  asyncTest("Try to get attachment of unexistent doc", function() {
+    initTestDB(this.name, function(err, db) {
+      db.getAttachment("unexistent", function(err, res) {
+        ok(err, "Correctly returned error");
+        db.getAttachment("unexistent/attachment", function(err, res) {
+          ok(err, "Correctly returned error");
+          start();
+        });
+      });
+    });
+  });
+
+  asyncTest("Try to get unexistent attachment of some doc", function() {
+    initTestDB(this.name, function(err, db) {
+      db.put({_id: "foo"}, function(err, res) {
+        ok(!err, "doc inserted");
+        db.getAttachment("foo/unexistentAttachment", function(err, res) {
+          ok(err, "Correctly returned error");
+          start();
+        });
+      });
+    });
+  });
 });
 
 
@@ -315,41 +398,35 @@ repl_adapters.map(function(adapters) {
     }
   });
 
+  asyncTest("Attachments replicate", function() {
+    var binAttDoc = {
+      _id: "bin_doc",
+      _attachments:{
+        "foo.txt": {
+          content_type:"text/plain",
+          data: "VGhpcyBpcyBhIGJhc2U2NCBlbmNvZGVkIHRleHQ="
+        }
+      }
+    };
 
-    asyncTest("Attachments replicate", function() {
-        console.info('Starting Test: Attachments replicate');
+    var docs1 = [
+      binAttDoc,
+      {_id: "0", integer: 0},
+      {_id: "1", integer: 1},
+      {_id: "2", integer: 2},
+      {_id: "3", integer: 3}
+    ];
 
-        var binAttDoc = {
-          _id: "bin_doc",
-          _attachments:{
-            "foo.txt": {
-              content_type:"text/plain",
-              data: "VGhpcyBpcyBhIGJhc2U2NCBlbmNvZGVkIHRleHQ="
-            }
-          }
-        };
-
-        var docs1 = [
-          binAttDoc,
-          {_id: "0", integer: 0},
-          {_id: "1", integer: 1},
-          {_id: "2", integer: 2},
-          {_id: "3", integer: 3}
-        ];
-
-        initDBPair(this.name, this.remote, function(db, remote) {
-          remote.bulkDocs({docs: docs1}, function(err, info) {
-            var replicate = db.replicate.from(remote, function() {
-              db.get('bin_doc', {attachments: true}, function(err, doc) {
-                equal(binAttDoc._attachments['foo.txt'].data,
-                      doc._attachments['foo.txt'].data);
-                start();
-              });
-            });
+    initDBPair(this.name, this.remote, function(db, remote) {
+      remote.bulkDocs({docs: docs1}, function(err, info) {
+        var replicate = db.replicate.from(remote, function() {
+          db.get('bin_doc', {attachments: true}, function(err, doc) {
+            equal(binAttDoc._attachments['foo.txt'].data,
+                  doc._attachments['foo.txt'].data);
+            start();
           });
         });
+      });
     });
-
-
-
+  });
 });

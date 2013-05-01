@@ -184,67 +184,31 @@ var LevelPouch = function(opts, callback) {
         doc._id = metadata.id;
         doc._rev = rev;
 
-        if (opts.attachments && doc._attachments) {
-          var attachments = Object.keys(doc._attachments);
-          var recv = 0;
-
-          attachments.forEach(function(key) {
-            api.getAttachment(doc._id + '/' + key, {encode: true}, function(err, data) {
-              doc._attachments[key].data = data;
-
-              if (++recv === attachments.length) {
-                callback(doc, metadata);
-              }
-            });
-          });
-        }
-        else {
-          if (doc._attachments){
-            for (var key in doc._attachments) {
-              doc._attachments[key].stub = true;
-            }
-          }
-          callback(doc, metadata);
-        }
+        return call(callback, null, {doc: doc, metadata: metadata});
       });
     });
   };
 
   // not technically part of the spec, but if putAttachment has its own method...
-  api._getAttachment = function(id, opts, callback) {
-    if (id.attachmentId === '') {
-      return api.get(id, opts, callback);
-    }
+  api._getAttachment = function(attachment, opts, callback) {
+    var digest = attachment.digest;
+    var type = attachment.content_type;
 
-    stores[DOC_STORE].get(id.docId, function(err, metadata) {
+    stores[ATTACH_BINARY_STORE].get(digest, function(err, attach) {
+      var data;
+
+      if (err && err.name === 'NotFoundError') {
+        // Empty attachment
+        data = opts.encode ? '' : new Buffer('');
+        return call(callback, null, data);
+      }
+
       if (err) {
         return call(callback, err);
       }
-      var seq = metadata.seq;
-      stores[BY_SEQ_STORE].get(seq, function(err, doc) {
-        if (err) {
-          return call(callback, err);
-        }
-        var digest = doc._attachments[id.attachmentId].digest;
-        var type = doc._attachments[id.attachmentId].content_type;
 
-        stores[ATTACH_BINARY_STORE].get(digest, function(err, attach) {
-          var data;
-
-          if (err && err.name === 'NotFoundError') {
-            // Empty attachment
-            data = opts.encode ? '' : new Buffer('');
-            return call(callback, null, data);
-          }
-
-          if (err) {
-            return call(callback, err);
-          }
-
-          data = opts.encode ? btoa(attach) : attach;
-          call(callback, null, data);
-        });
-      });
+      data = opts.encode ? btoa(attach) : attach;
+      call(callback, null, data);
     });
   };
 
@@ -333,7 +297,7 @@ var LevelPouch = function(opts, callback) {
       writeDoc(docInfo, callback);
     }
 
-    function writeDoc(doc, callback) {
+    function writeDoc(doc, callback2) {
       var err = null;
       var recv = 0;
 
@@ -351,7 +315,7 @@ var LevelPouch = function(opts, callback) {
         if (!err) {
           if (attachmentErr) {
             err = attachmentErr;
-            call(callback, err);
+            call(callback2, err);
           } else if (recv === attachments.length) {
             finish();
           }
@@ -369,7 +333,12 @@ var LevelPouch = function(opts, callback) {
           var data = doc.data._attachments[key].data;
           // if data is a string, it's likely to actually be base64 encoded
           if (typeof data === 'string') {
-            data = Pouch.utils.atob(data);
+            try {
+              data = Pouch.utils.atob(data);
+            } catch(e) {
+              call(callback, Pouch.error(Pouch.Errors.BAD_ARG, "Attachments need to be base64 encoded"));
+              return;
+            }
           }
           var digest = 'md5-' + crypto.createHash('md5')
                 .update(data || '')
@@ -395,7 +364,7 @@ var LevelPouch = function(opts, callback) {
 
           stores[DOC_STORE].put(doc.metadata.id, doc.metadata, function(err) {
             results.push(doc);
-            return saveUpdateSeq(callback);
+            return saveUpdateSeq(callback2);
           });
         });
       }
@@ -593,9 +562,10 @@ var LevelPouch = function(opts, callback) {
 
   api._changes = function(opts) {
 
-    var descending = 'descending' in opts ? opts.descending : false;
+    var descending = opts.descending;
     var results = [];
     var changeListener;
+    var last_seq = 0;
 
     function fetchChanges() {
       var streamOpts = {
@@ -630,6 +600,10 @@ var LevelPouch = function(opts, callback) {
               doc: data.value
             };
 
+            if (last_seq < metadata.seq) {
+              last_seq = metadata.seq;
+            }
+
             change.doc._rev = Pouch.merge.winningRev(metadata);
 
            if (isDeleted(metadata)) {
@@ -655,8 +629,8 @@ var LevelPouch = function(opts, callback) {
             change_emitter.on('change', changeListener);
           }
           // filters changes in-place, calling opts.onChange on matching changes
-          results.map(Pouch.utils.filterChange(opts));
-          call(opts.complete, null, {results: results});
+          results = results.filter(Pouch.utils.filterChange(opts));
+          call(opts.complete, null, {results: results, last_seq: last_seq});
         });
     }
 
@@ -842,6 +816,8 @@ LevelPouch.destroy = function(name, callback) {
     });
   }
 };
+
+LevelPouch.use_prefix = false;
 
 Pouch.adapter('ldb', LevelPouch);
 Pouch.adapter('leveldb', LevelPouch);

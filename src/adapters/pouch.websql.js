@@ -1,5 +1,6 @@
 /*globals call: false, extend: false, parseDoc: false, Crypto: false */
 /*globals isLocalId: false, isDeleted: false, Changes: false, filterChange: false */
+/*global isCordova*/
 
 'use strict';
 
@@ -46,42 +47,51 @@ var webSqlPouch = function(opts, callback) {
     callback(null, api);
   }
 
-  db.transaction(function (tx) {
-    var meta = 'CREATE TABLE IF NOT EXISTS ' + META_STORE +
-      ' (update_seq, dbid)';
-    var attach = 'CREATE TABLE IF NOT EXISTS ' + ATTACH_STORE +
-      ' (digest, json, body BLOB)';
-    var doc = 'CREATE TABLE IF NOT EXISTS ' + DOC_STORE +
-      ' (id unique, seq, json, winningseq)';
-    var seq = 'CREATE TABLE IF NOT EXISTS ' + BY_SEQ_STORE +
-      ' (seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, doc_id_rev UNIQUE, json)';
+  function setup(){
+    db.transaction(function (tx) {
+      var meta = 'CREATE TABLE IF NOT EXISTS ' + META_STORE +
+        ' (update_seq, dbid)';
+      var attach = 'CREATE TABLE IF NOT EXISTS ' + ATTACH_STORE +
+        ' (digest, json, body BLOB)';
+      var doc = 'CREATE TABLE IF NOT EXISTS ' + DOC_STORE +
+        ' (id unique, seq, json, winningseq)';
+      var seq = 'CREATE TABLE IF NOT EXISTS ' + BY_SEQ_STORE +
+        ' (seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, doc_id_rev UNIQUE, json)';
 
-    tx.executeSql(attach);
-    tx.executeSql(doc);
-    tx.executeSql(seq);
-    tx.executeSql(meta);
+      tx.executeSql(attach);
+      tx.executeSql(doc);
+      tx.executeSql(seq);
+      tx.executeSql(meta);
 
-    var updateseq = 'SELECT update_seq FROM ' + META_STORE;
-    tx.executeSql(updateseq, [], function(tx, result) {
-      if (!result.rows.length) {
-        var initSeq = 'INSERT INTO ' + META_STORE + ' (update_seq) VALUES (?)';
-        var newId = Math.uuid();
-        tx.executeSql(initSeq, [0]);
-        return;
-      }
-      update_seq = result.rows.item(0).update_seq;
-    });
-    var dbid = 'SELECT dbid FROM ' + META_STORE;
-    tx.executeSql(dbid, [], function(tx, result) {
-      if (!result.rows.length) {
-        var initDb = 'INSERT INTO ' + META_STORE + ' (dbid) VALUES (?)';
-        var newId = Math.uuid();
-        tx.executeSql(initDb, [newId]);
-        return;
-      }
-      instanceId = result.rows.item(0).dbid;
-    });
-  }, unknownError(callback), dbCreated);
+      var updateseq = 'SELECT update_seq FROM ' + META_STORE;
+      tx.executeSql(updateseq, [], function(tx, result) {
+        if (!result.rows.length) {
+          var initSeq = 'INSERT INTO ' + META_STORE + ' (update_seq) VALUES (?)';
+          var newId = Math.uuid();
+          tx.executeSql(initSeq, [0]);
+          return;
+        }
+        update_seq = result.rows.item(0).update_seq;
+      });
+      var dbid = 'SELECT dbid FROM ' + META_STORE;
+      tx.executeSql(dbid, [], function(tx, result) {
+        if (!result.rows.length) {
+          var initDb = 'INSERT INTO ' + META_STORE + ' (dbid) VALUES (?)';
+          instanceId = Math.uuid();
+          tx.executeSql(initDb, [instanceId]);
+          return;
+        }
+        instanceId = result.rows.item(0).dbid;
+      });
+    }, unknownError(callback), dbCreated);
+  }
+  if (isCordova()){
+    //to wait until custom api is made in pouch.adapters before doing setup
+    window.addEventListener(name + "_pouch", setup, false);
+  } else {
+    setup();
+  }
+
 
   api.type = function() {
     return 'websql';
@@ -176,20 +186,24 @@ var webSqlPouch = function(opts, callback) {
       call(callback, null, aresults);
     }
 
-    function preprocessAttachment(att, callback) {
+    function preprocessAttachment(att, finish) {
       if (att.stub) {
-        return callback();
+        return finish();
       }
       if (typeof att.data === 'string') {
-        att.data = atob(att.data);
+        try {
+          att.data = atob(att.data);
+        } catch(e) {
+          return call(callback, Pouch.error(Pouch.Errors.BAD_ARG, "Attachments need to be base64 encoded"));
+        }
         att.digest = 'md5-' + Crypto.MD5(att.data);
-        return callback();
+        return finish();
       }
       var reader = new FileReader();
       reader.onloadend = function(e) {
         att.data = this.result;
         att.digest = 'md5-' + Crypto.MD5(this.result);
-        callback();
+        finish();
       };
       reader.readAsBinaryString(att.data);
     }
@@ -394,55 +408,47 @@ var webSqlPouch = function(opts, callback) {
   };
 
   api._get = function(id, opts, callback) {
-    var result;
+    var doc;
     var metadata;
-    db.transaction(function(tx) {
-      var sql = 'SELECT * FROM ' + DOC_STORE + ' WHERE id=?';
-      tx.executeSql(sql, [id.docId], function(tx, results) {
-        if (!results.rows.length) {
-          result = Pouch.Errors.MISSING_DOC;
-          return;
-        }
-        metadata = JSON.parse(results.rows.item(0).json);
-        if (isDeleted(metadata) && !opts.rev) {
-          result = Pouch.error(Pouch.Errors.MISSING_DOC, "deleted");
-          return;
-        }
-
-        var rev = Pouch.merge.winningRev(metadata);
-        var key = opts.rev ? opts.rev : rev;
-        key = metadata.id + '::' + key;
-        var sql = 'SELECT * FROM ' + BY_SEQ_STORE + ' WHERE doc_id_rev=?';
-        tx.executeSql(sql, [key], function(tx, results) {
-          if (!results.rows.length) {
-            result = Pouch.Errors.MISSING_DOC;
-            return;
-          }
-          var doc = JSON.parse(results.rows.item(0).json);
-
-          if (opts.attachments && doc._attachments) {
-            var attachments = Object.keys(doc._attachments);
-            var recv = 0;
-            attachments.forEach(function(key) {
-              api.getAttachment(doc._id + '/' + key, {encode: true, txn: tx}, function(err, data) {
-                doc._attachments[key].data = data;
-                if (++recv === attachments.length) {
-                  result = doc;
-                }
-              });
-            });
-          } else {
-            if (doc._attachments){
-              for (var key in doc._attachments) {
-                doc._attachments[key].stub = true;
-              }
-            }
-            result = doc;
-          }
-        });
+    var err;
+    if (!opts.ctx) {
+      db.transaction(function(txn) {
+        opts.ctx = txn;
+        api._get(id, opts, callback);
       });
-    }, unknownError(callback), function () {
-      call(callback, result, metadata);
+      return;
+    }
+    var tx = opts.ctx;
+
+    function finish() {
+      call(callback, err, {doc: doc, metadata: metadata, ctx: tx});
+    }
+
+    var sql = 'SELECT * FROM ' + DOC_STORE + ' WHERE id=?';
+    tx.executeSql(sql, [id.docId], function(a, results) {
+      if (!results.rows.length) {
+        err = Pouch.Errors.MISSING_DOC;
+        return finish();
+      }
+      metadata = JSON.parse(results.rows.item(0).json);
+      if (isDeleted(metadata) && !opts.rev) {
+        err = Pouch.error(Pouch.Errors.MISSING_DOC, "deleted");
+        return finish();
+      }
+
+      var rev = Pouch.merge.winningRev(metadata);
+      var key = opts.rev ? opts.rev : rev;
+      key = metadata.id + '::' + key;
+      var sql = 'SELECT * FROM ' + BY_SEQ_STORE + ' WHERE doc_id_rev=?';
+      tx.executeSql(sql, [key], function(tx, results) {
+        if (!results.rows.length) {
+          err = Pouch.Errors.MISSING_DOC;
+          return finish();
+        }
+        doc = JSON.parse(results.rows.item(0).json);
+
+        finish();
+      });
     });
   };
 
@@ -539,10 +545,6 @@ var webSqlPouch = function(opts, callback) {
       console.log(name + ': Start Changes Feed: continuous=' + opts.continuous);
     }
 
-    if (!opts.since) {
-      opts.since = 0;
-    }
-
     if (opts.continuous) {
       var id = name + ':' + Math.uuid();
       opts.cancelled = false;
@@ -559,13 +561,12 @@ var webSqlPouch = function(opts, callback) {
       };
     }
 
-    var descending = 'descending' in opts ? opts.descending : false;
-    descending = descending ? 'prev' : null;
+    var descending = opts.descending;
 
     // Ignore the `since` parameter when `descending` is true
     opts.since = opts.since && !descending ? opts.since : 0;
 
-    var results = [], resultIndices = {}, dedupResults = [];
+    var results = [];
     var txn;
 
     function fetchChanges() {
@@ -581,10 +582,14 @@ var webSqlPouch = function(opts, callback) {
 
       db.transaction(function(tx) {
         tx.executeSql(sql, [], function(tx, result) {
+          var last_seq = 0;
           for (var i = 0, l = result.rows.length; i < l; i++ ) {
             var doc = result.rows.item(i);
             var metadata = JSON.parse(doc.metadata);
             if (!isLocalId(metadata.id)) {
+              if (last_seq < doc.seq) {
+                last_seq = doc.seq;
+              }
               var change = {
                 id: metadata.id,
                 seq: doc.seq,
@@ -601,15 +606,8 @@ var webSqlPouch = function(opts, callback) {
               results.push(change);
             }
           }
-          for (i = 0, l = results.length; i < l; i++ ) {
-            result = results[i];
-            if (result) {
-              dedupResults.push(result);
-            }
-          }
-          dedupResults.map(filterChange(opts));
-
-          call(opts.complete, null, {results: dedupResults});
+          results = results.filter(filterChange(opts));
+          call(opts.complete, null, {results: results, last_seq: last_seq});
         });
       });
     }
@@ -628,42 +626,21 @@ var webSqlPouch = function(opts, callback) {
     }
   };
 
-  api._getAttachment = function(id, opts, callback) {
-
+  api._getAttachment = function(attachment, opts, callback) {
     var res;
-    function fetchAttachment(tx) {
-      var sql = 'SELECT ' + BY_SEQ_STORE + '.json AS data FROM ' + DOC_STORE +
-        ' JOIN ' + BY_SEQ_STORE + ' ON ' + BY_SEQ_STORE + '.seq = ' + DOC_STORE +
-        '.seq WHERE ' + DOC_STORE + '.id = "' + id.docId + '"' ;
-      tx.executeSql(sql, [], function(tx, result) {
-        var doc = JSON.parse(result.rows.item(0).data);
-        var attachment = doc._attachments[id.attachmentId];
-        var digest = attachment.digest;
-        var type = attachment.content_type;
-        var sql = 'SELECT body FROM ' + ATTACH_STORE + ' WHERE digest=?';
-        tx.executeSql(sql, [digest], function(tx, result) {
-          var data = result.rows.item(0).body;
-          if (opts.encode) {
-            res = btoa(data);
-          } else {
-            res = new Blob([data], {type: type});
-          }
-          if ('txn' in opts) {
-            call(callback, null, res);
-          }
-        });
-      });
-    }
-
-    // This can be called while we are in a current transaction, pass the context
-    // along and dont wait for the transaction to complete here.
-    if ('txn' in opts) {
-      fetchAttachment(opts.txn);
-    } else {
-      db.transaction(fetchAttachment, unknownError(callback), function() {
-        call(callback, null, res);
-      });
-    }
+    var tx = opts.ctx;
+    var digest = attachment.digest;
+    var type = attachment.content_type;
+    var sql = 'SELECT body FROM ' + ATTACH_STORE + ' WHERE digest=?';
+    tx.executeSql(sql, [digest], function(tx, result) {
+      var data = result.rows.item(0).body;
+      if (opts.encode) {
+        res = btoa(data);
+      } else {
+        res = new Blob([data], {type: type});
+      }
+      call(callback, null, res);
+    });
   };
 
   api._getRevisionTree = function(docId, callback) {

@@ -23,12 +23,6 @@ var IDBTransaction = (window.IDBTransaction && window.IDBTransaction.READ_WRITE)
 var IDBKeyRange = window.IDBKeyRange ||
   window.webkitIDBKeyRange;
 
-window.storageInfo = window.storageInfo ||
-  window.webkitStorageInfo;
-
-window.requestFileSystem = window.requestFileSystem ||
-    window.webkitRequestFileSystem;
-
 var idbError = function(callback) {
   return function(event) {
     call(callback, {
@@ -96,6 +90,17 @@ var IdbPouch = function(opts, callback) {
     db.createObjectStore(ATTACH_STORE, {keyPath: 'digest'});
     db.createObjectStore(META_STORE, {keyPath: 'id', autoIncrement: false});
     db.createObjectStore(DETECT_BLOB_SUPPORT_STORE);
+  }
+
+  // From http://stackoverflow.com/questions/14967647/encode-decode-image-with-base64-breaks-image (2013-04-21)
+  function fixBinary(bin) {
+    var length = bin.length;
+    var buf = new ArrayBuffer(length);
+    var arr = new Uint8Array(buf);
+    for (var i = 0; i < length; i++) {
+      arr[i] = bin.charCodeAt(i);
+    }
+    return buf;
   }
 
   req.onsuccess = function(e) {
@@ -243,18 +248,24 @@ var IdbPouch = function(opts, callback) {
       call(callback, null, aresults);
     }
 
-    function preprocessAttachment(att, callback) {
+    function preprocessAttachment(att, finish) {
       if (att.stub) {
-        return callback();
+        return finish();
       }
       if (typeof att.data === 'string') {
-        var data = atob(att.data);
+        var data;
+        try {
+          data = atob(att.data);
+        } catch(e) {
+          return call(callback, Pouch.error(Pouch.Errors.BAD_ARG, "Attachments need to be base64 encoded"));
+        }
         att.digest = 'md5-' + Crypto.MD5(data);
         if (blobSupport) {
           var type = att.content_type;
+          data = fixBinary(data);
           att.data = new Blob([data], {type: type});
         }
-        return callback();
+        return finish();
       }
       var reader = new FileReader();
       reader.onloadend = function(e) {
@@ -262,7 +273,7 @@ var IdbPouch = function(opts, callback) {
         if (!blobSupport) {
           att.data = btoa(this.result);
         }
-        callback();
+        finish();
       };
       reader.readAsBinaryString(att.data);
     }
@@ -436,12 +447,19 @@ var IdbPouch = function(opts, callback) {
   // First we look up the metadata in the ids database, then we fetch the
   // current revision(s) from the by sequence store
   api._get = function idb_get(id, opts, callback) {
-    var result;
+    var doc;
     var metadata;
-    var txn = idb.transaction([DOC_STORE, BY_SEQ_STORE, ATTACH_STORE], 'readonly');
-    txn.oncomplete = function() {
-      call(callback, result, metadata);
-    };
+    var err;
+    var txn;
+    if (opts.ctx) {
+      txn = opts.ctx;
+    } else {
+      txn = idb.transaction([DOC_STORE, BY_SEQ_STORE, ATTACH_STORE], 'readonly');
+    }
+
+    function finish(){
+      call(callback, err, {doc: doc, metadata: metadata, ctx: txn});
+    }
 
     txn.objectStore(DOC_STORE).get(id.docId).onsuccess = function(e) {
       metadata = e.target.result;
@@ -451,12 +469,12 @@ var IdbPouch = function(opts, callback) {
       // When we ask with opts.rev we expect the answer to be either
       // doc (possibly with _deleted=true) or missing error
       if (!metadata) {
-        result = Pouch.Errors.MISSING_DOC;
-        return;
+        err = Pouch.Errors.MISSING_DOC;
+        return finish();
       }
       if (isDeleted(metadata) && !opts.rev) {
-        result = Pouch.error(Pouch.Errors.MISSING_DOC, "deleted");
-        return;
+        err = Pouch.error(Pouch.Errors.MISSING_DOC, "deleted");
+        return finish();
       }
 
       var rev = Pouch.merge.winningRev(metadata);
@@ -464,94 +482,49 @@ var IdbPouch = function(opts, callback) {
       var index = txn.objectStore(BY_SEQ_STORE).index('_doc_id_rev');
 
       index.get(key).onsuccess = function(e) {
-        var doc = e.target.result;
+        doc = e.target.result;
         if(doc && doc._doc_id_rev) {
           delete(doc._doc_id_rev);
         }
         if (!doc) {
-          result = Pouch.Errors.MISSING_DOC;
-          return;
+          err = Pouch.Errors.MISSING_DOC;
+          return finish();
         }
-        if (opts.attachments && doc._attachments) {
-          var attachments = Object.keys(doc._attachments);
-          var recv = 0;
-
-          attachments.forEach(function(key) {
-            api.getAttachment(doc._id + '/' + key, {encode: true, txn: txn}, function(err, data) {
-              doc._attachments[key].data = data;
-
-              if (++recv === attachments.length) {
-                result = doc;
-              }
-            });
-          });
-        } else {
-          if (doc._attachments){
-            for (var key in doc._attachments) {
-              doc._attachments[key].stub = true;
-            }
-          }
-          result = doc;
-        }
+        finish();
       };
     };
   };
 
-  api._getAttachment = function(id, opts, callback) {
+  api._getAttachment = function(attachment, opts, callback) {
     var result;
-    var txn;
+    var txn = opts.ctx;
+    var digest = attachment.digest;
+    var type = attachment.content_type;
 
-    // This can be called while we are in a current transaction, pass the context
-    // along and dont wait for the transaction to complete here.
-    if ('txn' in opts) {
-      txn = opts.txn;
-    } else {
-      txn = idb.transaction([DOC_STORE, BY_SEQ_STORE, ATTACH_STORE], 'readonly');
-      txn.oncomplete = function() { call(callback, null, result); };
-    }
-
-    txn.objectStore(DOC_STORE).get(id.docId).onsuccess = function(e) {
-      var metadata = e.target.result;
-      var bySeq = txn.objectStore(BY_SEQ_STORE);
-      bySeq.get(metadata.seq).onsuccess = function(e) {
-        var attachment = e.target.result._attachments[id.attachmentId];
-        var digest = attachment.digest;
-        var type = attachment.content_type;
-
-        txn.objectStore(ATTACH_STORE).get(digest).onsuccess = function(e) {
-          var data = e.target.result.body;
-          if (opts.encode) {
-            if (blobSupport) {
-              var reader = new FileReader();
-              reader.onloadend = function(e) {
-                result = btoa(this.result);
-
-                if ('txn' in opts) {
-                  call(callback, null, result);
-                }
-              };
-              reader.readAsBinaryString(data);
-            } else {
-              result = data;
-
-              if ('txn' in opts) {
-                call(callback, null, result);
-              }
-            }
-          } else {
-            if (blobSupport) {
-              result = data;
-            } else {
-              result = new Blob([atob(data)], {type: type});
-            }
-            if ('txn' in opts) {
-              call(callback, null, result);
-            }
-          }
-        };
-      };
+    txn.objectStore(ATTACH_STORE).get(digest).onsuccess = function(e) {
+      var data = e.target.result.body;
+      if (opts.encode) {
+        if (blobSupport) {
+          var reader = new FileReader();
+          reader.onloadend = function(e) {
+            result = btoa(this.result);
+            call(callback, null, result);
+          };
+          reader.readAsBinaryString(data);
+        } else {
+          result = data;
+          call(callback, null, result);
+        }
+      } else {
+        if (blobSupport) {
+          result = data;
+        } else {
+          data = fixBinary(atob(data));
+          result = new Blob([data], {type: type});
+        }
+        call(callback, null, result);
+      }
     };
-    return;
   };
 
   api._allDocs = function idb_allDocs(opts, callback) {
@@ -683,10 +656,6 @@ var IdbPouch = function(opts, callback) {
       console.log(name + ': Start Changes Feed: continuous=' + opts.continuous);
     }
 
-    if (!opts.since) {
-      opts.since = 0;
-    }
-
     if (opts.continuous) {
       var id = name + ':' + Math.uuid();
       opts.cancelled = false;
@@ -703,8 +672,8 @@ var IdbPouch = function(opts, callback) {
       };
     }
 
-    var descending = 'descending' in opts ? opts.descending : false;
-    descending = descending ? 'prev' : null;
+    var descending = opts.descending ? 'prev' : null;
+    var last_seq = 0;
 
     // Ignore the `since` parameter when `descending` is true
     opts.since = opts.since && !descending ? opts.since : 0;
@@ -782,6 +751,10 @@ var IdbPouch = function(opts, callback) {
           return cursor['continue']();
         }
 
+        if(last_seq < metadata.seq){
+          last_seq = metadata.seq;
+        }
+
         var mainRev = Pouch.merge.winningRev(metadata);
         var key = metadata.id + "::" + mainRev;
         var index = txn.objectStore(BY_SEQ_STORE).index('_doc_id_rev');
@@ -820,8 +793,8 @@ var IdbPouch = function(opts, callback) {
     }
 
     function onTxnComplete() {
-      dedupResults.map(filterChange(opts));
-      call(opts.complete, null, {results: dedupResults});
+      dedupResults = dedupResults.filter(filterChange(opts));
+      call(opts.complete, null, {results: dedupResults, last_seq: last_seq});
     }
 
     function onerror(error) {
@@ -855,7 +828,7 @@ var IdbPouch = function(opts, callback) {
   };
 
   // This function removes revisions of document docId
-  // which are listed in revs and sets this document 
+  // which are listed in revs and sets this document
   // revision to to rev_tree
   api._doCompaction = function(docId, rev_tree, revs, callback) {
     var txn = idb.transaction([DOC_STORE, BY_SEQ_STORE], IDBTransaction.READ_WRITE);

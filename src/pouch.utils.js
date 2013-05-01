@@ -216,20 +216,19 @@ var filterChange = function(opts) {
     var req = {};
     req.query = opts.query_params;
     if (opts.filter && !opts.filter.call(this, change.doc, req)) {
-      return;
+      return false;
     }
     if (opts.doc_ids && opts.doc_ids.indexOf(change.id) !== -1) {
-      return;
+      return false;
     }
     if (!opts.include_docs) {
       delete change.doc;
     }
     call(opts.onChange, change);
+    return true;
   };
 };
 
-// returns array of all branches from root to leaf in the ids form:
-// [[id, ...], ...]
 var rootToLeaf = function(tree) {
   var paths = [];
   Pouch.merge.traverseRevTree(tree, function(isLeaf, pos, id, history, opts) {
@@ -268,6 +267,10 @@ var isChromeApp = function(){
   return (typeof chrome !== "undefined" && typeof chrome.storage !== "undefined" && typeof chrome.storage.local !== "undefined");
 };
 
+var isCordova = function(){
+  return (typeof cordova !== "undefined" || typeof PhoneGap !== "undefined" || typeof phonegap !== "undefined");
+};
+
 if (typeof module !== 'undefined' && module.exports) {
   // use node.js's crypto library instead of the Crypto object created by deps/uuid.js
   var crypto = require('crypto');
@@ -297,15 +300,22 @@ if (typeof module !== 'undefined' && module.exports) {
     arrayFirst: arrayFirst,
     filterChange: filterChange,
     atob: function(str) {
-      return decodeURIComponent(escape(new Buffer(str, 'base64').toString('binary')));
+      var base64 = new Buffer(str, 'base64');
+      // Node.js will just skip the characters it can't encode instead of
+      // throwing and exception
+      if (base64.toString('base64') !== str) {
+        throw("Cannot base64 encode full string");
+      }
+      return base64.toString('binary');
     },
     btoa: function(str) {
-      return new Buffer(unescape(encodeURIComponent(str)), 'binary').toString('base64');
+      return new Buffer(str, 'binary').toString('base64');
     },
     extend: extend,
     ajax: ajax,
     rootToLeaf: rootToLeaf,
-    isChromeApp: isChromeApp
+    isChromeApp: isChromeApp,
+    isCordova: isCordova
   };
 }
 

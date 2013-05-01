@@ -1,5 +1,6 @@
 /*globals Pouch: true, yankError: false, extend: false, call: false, parseDocId: false, traverseRevTree: false */
 /*globals arrayFirst: false, rootToLeaf: false, computeHeight: false */
+/*globals cordova, isCordova */
 
 "use strict";
 
@@ -158,7 +159,7 @@ var PouchAdapter = function(opts, callback) {
       opts = {};
     }
     opts.was_delete = true;
-    var newDoc = extend(true, {}, doc);
+    var newDoc = {_id: doc._id, _rev: doc._rev};
     newDoc._deleted = true;
     return customApi.bulkDocs({docs: [newDoc]}, opts, yankError(callback));
   };
@@ -316,14 +317,29 @@ var PouchAdapter = function(opts, callback) {
 
     id = parseDocId(id);
     if (id.attachmentId !== '') {
-      return customApi.getAttachment(id, callback);
+      return customApi._get(id, opts, function(err, result){
+        if (err) {
+          return call(callback, err);
+        }
+        if (result.doc._attachments && result.doc._attachments[id.attachmentId]) {
+          customApi._getAttachment(result.doc._attachments[id.attachmentId],
+                                   {encode: false, ctx: result.ctx}, function(err, data) {
+            return call(callback, null, data);
+          });
+        } else {
+          return call(callback, Pouch.Errors.MISSING_DOC);
+        }
+      });
     }
-    return customApi._get(id, opts, function(result, metadata) {
-      if ('error' in result) {
-        return call(callback, result);
+
+    return customApi._get(id, opts, function(err, result) {
+      if (err) {
+        return call(callback, err);
       }
 
-      var doc = result;
+      var doc = result.doc;
+      var metadata = result.metadata;
+      var ctx = result.ctx;
 
       if (opts.conflicts) {
         var conflicts = Pouch.merge.collectConflicts(metadata);
@@ -362,7 +378,26 @@ var PouchAdapter = function(opts, callback) {
           });
         }
       }
-      call(callback, null, doc);
+
+      if (opts.attachments && doc._attachments) {
+        var attachments = doc._attachments;
+        var count = Object.keys(attachments).length;
+        Object.keys(attachments).forEach(function(key) {
+          customApi._getAttachment(attachments[key], {encode: true, ctx: ctx}, function(err, data) {
+            doc._attachments[key].data = data;
+            if (!--count){
+              call(callback, null, doc);
+            }
+          });
+        });
+      } else {
+        if (doc._attachments){
+          for (var key in doc._attachments) {
+            doc._attachments[key].stub = true;
+          }
+        }
+        call(callback, null, doc);
+      }
     });
   };
 
@@ -371,11 +406,9 @@ var PouchAdapter = function(opts, callback) {
       callback = opts;
       opts = {};
     }
-    if (typeof id === 'string') {
-      id = parseDocId(id);
-    }
-
-    return customApi._getAttachment(id, opts, callback);
+    customApi.get(id, function(err, res) {
+      callback(err, res);
+    });
   };
 
   api.allDocs = function(opts, callback) {
@@ -411,6 +444,14 @@ var PouchAdapter = function(opts, callback) {
       return;
     }
     opts = extend(true, {}, opts);
+
+    if (!opts.since) {
+      opts.since = 0;
+    }
+
+    if (!('descending' in opts)) {
+      opts.descending = false;
+    }
 
     // 0 and 1 should return 1 document
     opts.limit = opts.limit === 0 ? 1 : opts.limit;
@@ -529,6 +570,10 @@ var PouchAdapter = function(opts, callback) {
     api.taskqueue.execute(api);
   }
 
+  if (isCordova()){
+    //to inform websql adapter that we can use api
+    cordova.fireWindowEvent(opts.name + "_pouch", {});
+  }
   return customApi;
 };
 
