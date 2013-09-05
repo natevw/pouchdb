@@ -1,16 +1,18 @@
-/*globals initTestDB: false, emit: true, generateAdapterUrl: false */
-/*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
-/*globals ajax: true, LevelPouch: true */
-/*globals cleanupTestDatabases: false */
+/*globals initTestDB, openTestDB, emit, generateAdapterUrl, cleanupTestDatabases */
+/*globals PERSIST_DATABASES, initDBPair, ajax, strictEqual */
+/*globals utils: true, LevelPouch: true */
 
 "use strict";
 
 var adapters = ['http-1', 'local-1'];
 var qunit = module;
 var LevelPouch;
+var PouchDB;
+var utils;
 
 if (typeof module !== undefined && module.exports) {
   Pouch = require('../src/pouch.js');
+  PouchDB = require('../src/pouch.js');
   LevelPouch = require('../src/adapters/pouch.leveldb.js');
   utils = require('./test.utils.js');
 
@@ -25,7 +27,7 @@ adapters.map(function(adapter) {
   qunit("basics: " + adapter, {
     setup: function() {
       this.name = generateAdapterUrl(adapter);
-      Pouch.enableAllDbs = true;
+      Pouch.enableAllDbs = false;
     },
     teardown: cleanupTestDatabases
   });
@@ -77,6 +79,28 @@ adapters.map(function(adapter) {
     });
   });
 
+  asyncTest("Close db", function() {
+    initTestDB(this.name, function(err, db) {
+      db.close(function(error){
+        ok(!err, 'close called back with an error');
+        start();
+      });
+    });
+  });
+
+  asyncTest("Read db id after closing", function() {
+    var dbName = this.name;
+    initTestDB(dbName, function(err, db) {
+      db.close(function(error){
+        ok(!err, 'close called back with an error');
+        openTestDB(dbName, function(err, db){
+          ok(typeof(db.id()) === 'string' && db.id() !== '', "got id");
+          start();
+        });
+      });
+    });
+  });
+
   asyncTest("Modify a doc with incorrect rev", 3, function() {
     initTestDB(this.name, function(err, db) {
       ok(!err, 'opened the pouch');
@@ -91,14 +115,15 @@ adapters.map(function(adapter) {
     });
   });
 
-  asyncTest("Add a doc with leading underscore in id", function() {
-    initTestDB(this.name, function(err, db) {
-      db.post({_id: '_testing', value: 42}, function(err, info) {
-        ok(err);
-        start();
-      });
-    });
-  });
+  // Documents with underscores in ids are valid in cloudant
+  // asyncTest("Add a doc with leading underscore in id", function() {
+  //   initTestDB(this.name, function(err, db) {
+  //     db.post({_id: '_testing', value: 42}, function(err, info) {
+  //       ok(err);
+  //       start();
+  //     });
+  //   });
+  // });
 
   asyncTest("Remove doc", 1, function() {
     initTestDB(this.name, function(err, db) {
@@ -152,12 +177,13 @@ adapters.map(function(adapter) {
 
   asyncTest("Remove doc, no callback", 2, function() {
     initTestDB(this.name, function(err, db) {
+      var changesCount = 2;
       var changes = db.changes({
         continuous: true,
         include_docs: true,
-        onChange: function(change){
-          if (change.seq === 2){
-            ok(change.doc._deleted, 'Doc deleted properly');
+        onChange: function(change) {
+          if (change.doc._deleted) {
+            ok(true, 'doc deleted');
             changes.cancel();
             start();
           }
@@ -238,7 +264,7 @@ adapters.map(function(adapter) {
           ok(res.rev);
           db.info(function(err, info) {
             ok(info.doc_count === 1);
-            equal(info.update_seq, updateSeq + 1, 'update seq incremented');
+            notEqual(info.update_seq, updateSeq , 'update seq changed');
             db.get(doc._id, function(err, doc) {
               ok(doc._id === res.id && doc._rev === res.rev);
               db.get(doc._id, {revs_info: true}, function(err, doc) {
@@ -250,6 +276,24 @@ adapters.map(function(adapter) {
         });
       });
     });
+  });
+
+  asyncTest("Doc validation", function() {
+    var bad_docs = [
+      {"_zing": 4},
+      {"_zoom": "hello"},
+      {"zane": "goldfish", "_fan": "something smells delicious"},
+      {"_bing": {"wha?": "soda can"}}
+    ];
+
+    initTestDB(this.name, function(err, db) {
+      db.bulkDocs({docs: bad_docs}, function(err, res) {
+        strictEqual(err.status, 500);
+        strictEqual(err.error, 'doc_validation');
+        start();
+      });
+    });
+
   });
 
   asyncTest("Testing issue #48", 1, function() {
@@ -294,9 +338,9 @@ adapters.map(function(adapter) {
     var name = this.name;
     initTestDB(name, function(err, db) {
       db.post({test:"somestuff"}, function (err, info) {
-        new Pouch(name, function(err, db) {
+        new PouchDB(name, function(err, db) {
           db.info(function(err, info) {
-            equal(info.update_seq, 1, 'Update seq persisted');
+            notEqual(info.update_seq, 0, 'Update seq persisted');
             equal(info.doc_count, 1, 'Doc Count persists');
             start();
           });
@@ -327,6 +371,43 @@ adapters.map(function(adapter) {
       });
     });
   });
+
+  asyncTest('Error when document is not an object', 5, function() {
+    initTestDB(this.name, function(err, db) {
+      var doc1 = [{_id: 'foo'}, {_id: 'bar'}];
+      var doc2 = "this is not an object";
+
+      var count = 5;
+      var callback = function(err, resp) {
+        ok(err, 'doc must be an object');
+        count--;
+        if (count === 0) {
+          start();
+        }
+      };
+
+      db.post(doc1, callback);
+      db.post(doc2, callback);
+      db.put(doc1, callback);
+      db.put(doc2, callback);
+      db.bulkDocs({docs: [doc1, doc2]}, callback);
+   });
+  });
+
+  asyncTest('Test instance update_seq updates correctly', function() {
+    var db1 = new PouchDB(this.name);
+    var db2 = new PouchDB(this.name);
+    db1.post({a:'doc'}, function() {
+      db1.info(function(err, db1Info) {
+        db2.info(function(err, db2Info) {
+          notEqual(db1Info.update_seq, 0, 'Update seqs arent 0');
+          notEqual(db2Info.update_seq, 0, 'Update seqs arent 0');
+          start();
+        });
+      });
+    });
+  });
+
   test('Error works', 1, function() {
     deepEqual(Pouch.error(Pouch.Errors.BAD_REQUEST, "love needs no reason"),
       {status: 400, error: "bad_request", reason: "love needs no reason"},

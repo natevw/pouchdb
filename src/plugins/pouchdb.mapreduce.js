@@ -1,6 +1,11 @@
-/*global Pouch: true */
+/*global Pouch: true, pouchCollate: true */
 
 "use strict";
+
+var pouchCollate;
+if (typeof module !== 'undefined' && module.exports) {
+  pouchCollate = require('../pouch.collate.js');
+}
 
 // This is the first implementation of a basic plugin, we register the
 // plugin object with pouch and it is mixin'd to each database created
@@ -21,6 +26,10 @@ var MapReduce = function(db) {
       return;
     }
 
+    if (!options.skip) {
+      options.skip = 0;
+    }
+
     if (!fun.reduce) {
       options.reduce = false;
     }
@@ -28,6 +37,38 @@ var MapReduce = function(db) {
     function sum(values) {
       return values.reduce(function(a, b) { return a + b; }, 0);
     }
+
+    var builtInReduce = {
+      "_sum": function(keys, values){
+        return sum(values);
+      },
+
+      "_count": function(keys, values, rereduce){
+        if (rereduce){
+          return sum(values);
+        } else {
+          return values.length;
+        }
+      },
+
+      "_stats": function(keys, values, rereduce) {
+        return {
+          'sum': sum(values),
+          'min': Math.min.apply(null, values),
+          'max': Math.max.apply(null, values),
+          'count': values.length,
+          'sumsqr': (function(){
+            var _sumsqr = 0;
+            for(var idx in values) {
+              if (typeof values[idx] === 'number') {
+              _sumsqr += values[idx] * values[idx];
+              }
+            }
+            return _sumsqr;
+          })()
+        };
+      }
+    };
 
     var results = [];
     var current = null;
@@ -41,9 +82,9 @@ var MapReduce = function(db) {
         value: val
       };
 
-      if (options.startkey && Pouch.collate(key, options.startkey) < 0) return;
-      if (options.endkey && Pouch.collate(key, options.endkey) > 0) return;
-      if (options.key && Pouch.collate(key, options.key) !== 0) return;
+      if (options.startkey && pouchCollate(key, options.startkey) < 0) return;
+      if (options.endkey && pouchCollate(key, options.endkey) > 0) return;
+      if (options.key && pouchCollate(key, options.key) !== 0) return;
 
       num_started++;
       if (options.include_docs) {
@@ -69,6 +110,10 @@ var MapReduce = function(db) {
     // above emit
     eval('fun.map = ' + fun.map.toString() + ';');
     if (fun.reduce) {
+      if (builtInReduce[fun.reduce]) {
+        fun.reduce = builtInReduce[fun.reduce];
+      }
+
       eval('fun.reduce = ' + fun.reduce.toString() + ';');
     }
 
@@ -76,24 +121,24 @@ var MapReduce = function(db) {
     var checkComplete= function(){
       if (completed && results.length == num_started){
         results.sort(function(a, b) {
-          return Pouch.collate(a.key, b.key);
+          return pouchCollate(a.key, b.key);
         });
         if (options.descending) {
           results.reverse();
         }
         if (options.reduce === false) {
           return options.complete(null, {
-            rows: ('limit' in options)
-              ? results.slice(0, options.limit)
-              : results,
-            total_rows: results.length
+            total_rows: results.length,
+            offset: options.skip,
+            rows: ('limit' in options) ? results.slice(options.skip, options.limit + options.skip) :
+              (options.skip > 0) ? results.slice(options.skip) : results
           });
         }
 
         var groups = [];
         results.forEach(function(e) {
           var last = groups[groups.length-1] || null;
-          if (last && Pouch.collate(last.key[0][0], e.key) === 0) {
+          if (last && pouchCollate(last.key[0][0], e.key) === 0) {
             last.key.push([e.key, e.id]);
             last.value.push(e.value);
             return;
@@ -101,17 +146,19 @@ var MapReduce = function(db) {
           groups.push({key: [[e.key, e.id]], value: [e.value]});
         });
         groups.forEach(function(e) {
-          e.value = fun.reduce(e.key, e.value) || null;
+          e.value = fun.reduce(e.key, e.value);
+          e.value = (typeof e.value === 'undefined') ? null : e.value;
           e.key = e.key[0][0];
         });
+
         options.complete(null, {
-          rows: ('limit' in options)
-            ? groups.slice(0, options.limit)
-            : groups,
-          total_rows: groups.length
+          total_rows: groups.length,
+          offset: options.skip,
+          rows: ('limit' in options) ? groups.slice(options.skip, options.limit + options.skip) :
+            (options.skip > 0) ? groups.slice(options.skip) : groups
         });
       }
-    }
+    };
 
     db.changes({
       conflicts: true,
@@ -160,6 +207,15 @@ var MapReduce = function(db) {
     }
     if (typeof opts.key !== 'undefined') {
       params.push('key=' + encodeURIComponent(JSON.stringify(opts.key)));
+    }
+    if (typeof opts.group !== 'undefined') {
+      params.push('group=' + opts.group);
+    }
+    if (typeof opts.group_level !== 'undefined') {
+      params.push('group_level=' + opts.group_level);
+    }
+    if (typeof opts.skip !== 'undefined') {
+      params.push('skip=' + opts.skip);
     }
 
     // If keys are supplied, issue a POST request to circumvent GET query string limits
@@ -230,6 +286,12 @@ var MapReduce = function(db) {
         if (callback) callback(err);
         return;
       }
+
+      if (!doc.views[parts[1]]) {
+        if (callback) callback({ error: 'not_found', reason: 'missing_named_view' });
+        return;
+      }
+
       viewQuery({
         map: doc.views[parts[1]].map,
         reduce: doc.views[parts[1]].reduce

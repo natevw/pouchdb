@@ -1,6 +1,12 @@
-/*globals PouchAdapter: true, extend: true */
+/*globals PouchAdapter: true, PouchUtils: true */
 
 "use strict";
+
+var PouchUtils;
+
+if (typeof module !== 'undefined' && module.exports) {
+  PouchUtils = require('./pouch.utils.js');
+}
 
 var Pouch = function Pouch(name, opts, callback) {
 
@@ -77,7 +83,7 @@ var Pouch = function Pouch(name, opts, callback) {
 };
 
 Pouch.DEBUG = false;
-
+Pouch.openReqList = {};
 Pouch.adapters = {};
 Pouch.plugins = {};
 
@@ -303,6 +309,44 @@ Pouch.allDbs = function(callback) {
   accumulate(adapters, []);
 };
 
+/*
+  Examples:
+
+  >>> Pouch.uuids()
+  "92329D39-6F5C-4520-ABFC-AAB64544E172"]
+
+  >>> Pouch.uuids(10, {length: 32, radix: 5})
+  [ '04422200002240221333300140323100',
+    '02304411022101001312440440020110',
+    '41432430322114143303343433433030',
+    '21234330022303431304443100330401',
+    '23044133434242034101422131301213',
+    '43142032223224403322031032232041',
+    '41121132424023141101403324200330',
+    '00341042023103204342124004122342',
+    '01001141433040113422403034004214',
+    '30221232324132303123433131020020' ]
+ */
+Pouch.uuids = function (count, options) {
+
+  if (typeof(options) !== 'object') {
+    options = {};
+  }
+
+  var length = options.length;
+  var radix = options.radix;
+  var uuids = [];
+
+  while (uuids.push(PouchUtils.uuid(length, radix)) < count) { }
+
+  return uuids;
+};
+
+// Give back one UUID
+Pouch.uuid = function (options) {
+  return Pouch.uuids(1, options)[0];
+};
+
 // Enumerate errors, add the status code so we can reflect the HTTP api
 // in future
 Pouch.Errors = {
@@ -361,6 +405,11 @@ Pouch.Errors = {
     error: 'query_parse_error',
     reason: 'Some query parameter is invalid'
   },
+  DOC_VALIDATION: {
+    status: 500,
+    error: 'doc_validation',
+    reason: 'Bad special document member'
+  },
   BAD_REQUEST: {
     status: 400,
     error: 'bad_request',
@@ -375,27 +424,30 @@ Pouch.Errors = {
     status: 502,
     error: 'not_implemented',
     reason: 'Unable to fulfill the request'
+  },
+  NOT_AN_OBJECT: {
+    status: 400,
+    error: 'bad_request',
+    reason: 'Document must be a JSON object'
   }
 };
-Pouch.error = function(error, reason){
- return extend({}, error, {reason: reason});
+
+Pouch.error = function(error, reason) {
+  return PouchUtils.extend({}, error, {reason: reason});
 };
+
 if (typeof module !== 'undefined' && module.exports) {
   global.Pouch = Pouch;
-  Pouch.merge = require('./pouch.merge.js').merge;
-  Pouch.collate = require('./pouch.collate.js').collate;
-  Pouch.replicate = require('./pouch.replicate.js').replicate;
-  Pouch.utils = require('./pouch.utils.js');
-  extend = Pouch.utils.extend;
+  global.PouchDB = Pouch;
   module.exports = Pouch;
+  Pouch.replicate = require('./pouch.replicate.js').replicate;
   var PouchAdapter = require('./pouch.adapter.js');
-  //load adapters known to work under node
-  var adapters = ['leveldb', 'http'];
-  adapters.map(function(adapter) {
-    var adapter_path = './adapters/pouch.'+adapter+'.js';
-    require(adapter_path);
-  });
+  require('./adapters/pouch.http.js');
+  require('./adapters/pouch.idb.js');
+  require('./adapters/pouch.websql.js');
+  require('./adapters/pouch.leveldb.js');
   require('./plugins/pouchdb.mapreduce.js');
 } else {
   window.Pouch = Pouch;
+  window.PouchDB = Pouch;
 }

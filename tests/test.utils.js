@@ -1,7 +1,9 @@
-/*globals extend: false, Buffer: false, Pouch: true */
+/*globals extend: false, Buffer: false, Pouch: true, ajax:false */
 "use strict";
 
 var PERSIST_DATABASES = false;
+
+Array.prototype.wtf = function() { };
 
 function cleanupAllDbs() {
 
@@ -35,14 +37,16 @@ function cleanupAllDbs() {
   });
 }
 
-function cleanupTestDatabases() {
+function cleanupTestDatabases(alreadyStopped_) {
 
   if (PERSIST_DATABASES) {
     return;
   }
 
   // Stop the tests from executing
-  stop();
+  if(!alreadyStopped_) {
+      stop();
+  }
 
   var dbCount;
   var deleted = 0;
@@ -186,9 +190,10 @@ function generateAdapterUrl(id) {
     return 'testdb_' + testId + '_' + opt[1];
   }
   if (opt[0] === 'http') {
-    return (typeof module !== 'undefined' && module.exports) ?
-      'http://localhost:5984/testdb_' + testId + '_' + opt[1] :
-      'http://localhost:2020/testdb_' + testId + '_' + opt[1];
+    var host = (typeof module !== 'undefined' && module.exports) ?
+      process.env.COUCH_HOST || 'http://localhost:5984/' :
+      'http://localhost:2020/';
+    return host + 'testdb_' + testId + '_' + opt[1];
   }
 }
 
@@ -252,6 +257,163 @@ var putTree = function(db, tree, callback) {
   insert(0);
 };
 
+var writeDocs = function(db, docs, callback, res) {
+  if (!res) {
+    res = [];
+  }
+  if (!docs.length) {
+    return callback(null, res);
+  }
+  var doc = docs.shift();
+  db.put(doc, function(err, doc) {
+    ok(doc.ok, 'docwrite returned ok');
+    res.push(doc);
+    writeDocs(db, docs, callback, res);
+  });
+};
+
+
+// Borrowed from: http://stackoverflow.com/a/840849
+function eliminateDuplicates(arr) {
+  var i, element,
+      len = arr.length,
+      out = [],
+      obj = {};
+
+  for (i=0; i<len; i++) {
+    obj[arr[i]]=0;
+  }
+
+  for (element in obj) {
+    out.push(element);
+  }
+
+  return out;
+}
+
+// ---- CORS Specific Utils ---- //
+//enable CORS on server
+function enableCORS(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({url: host + '_config/httpd/enable_cors', json: false,
+    method: 'PUT', body: '"true"'}, function(err, resBody, req) {
+      ajax({url: host + '_config/cors/origins', json: false,
+        method: 'PUT', body: '"http://127.0.0.1:8000"'}, function(err, resBody, req) {
+          callback(err, req);
+      });
+  });
+}
+
+//enable CORS Credentials on server
+function enableCORSCredentials(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({url: host + '_config/cors/credentials',
+    method: 'PUT', body: '"true"', json: false}, function(err, resBody, req) {
+      callback(err, req);
+  });
+}
+
+//disable CORS
+function disableCORS(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({
+    url: host + '_config/cors/origins',
+    json: false,
+    method: 'PUT',
+    body: '"*"'
+  }, function (err, resBody, req) {
+    ajax({
+      url: host + '_config/httpd/enable_cors',
+      json: false,
+      method: 'PUT',
+      body: '"false"'
+    }, function (err, resBody, req) {
+      callback(err, req);
+    });
+  });
+}
+
+//disable CORS Credentials
+function disableCORSCredentials(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({
+    url: host + '_config/cors/credentials',
+    method: 'PUT',
+    body: '"false"',
+    json: false
+  }, function (err, resBody, req) {
+    callback(err, req);
+  });
+}
+
+//create admin user and member user
+function setupAdminAndMemberConfig(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({url: host + '_users/org.couchdb.user:TestUser',
+    method: 'PUT', body: {_id: 'org.couchdb.user:TestUser', name: 'TestUser',
+    password: 'user', roles: [], type: 'user'}}, function(err, resBody, req) {
+      ajax({url: host + '_config/admins/TestAdmin', json: false,
+        method: 'PUT', body: '"admin"'}, function(err, resBody, req) {
+          callback(err, req);
+      });
+  });
+}
+
+//delete admin and member user
+function tearDownAdminAndMemberConfig(dburl, callback) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+  var headers = {};
+  var token = btoa('TestAdmin:admin');
+  headers.Authorization = 'Basic ' + token;
+  ajax({url: host + '_config/admins/TestAdmin',
+    method: 'DELETE', headers:headers , json: false}, function(err, resBody, req) {
+      ajax({url: host + '_users/org.couchdb.user:TestUser',
+        method: 'GET', body: '"admin"'}, function(err, resBody, req) {
+          if (resBody) {
+            ajax({url: host + '_users/org.couchdb.user:TestUser?rev=' + resBody['_rev'],
+              method: 'DELETE', json: false}, function(err, resBody, req) {
+                callback(err, req);
+            });
+          } else {
+            callback(err, req);
+          }
+      });
+  });
+}
+
+function deleteCookieAuth(dburl, callback_) {
+  var host = 'http://' + dburl.split('/')[2] + '/';
+
+  ajax({
+    method: 'DELETE',
+    url: host + '_session',
+    withCredentials: true,
+    json: false
+  }, callback_);
+}
+
+function cleanUpCors(dburl, callback_) {
+  if (PERSIST_DATABASES) {
+    return;
+  }
+
+  if (typeof module !== 'undefined' && module.exports) {
+    disableCORS(dburl, function() {
+      Pouch.destroy(dburl, callback_);
+    });
+  } else {
+    disableCORS(dburl.replace('5984','2020'), function() {
+      Pouch.destroy(dburl.replace('5984','2020'), callback_);
+    });
+  }
+}
+// ---- END CORS Specific Utils ---- //
+
 if (typeof module !== 'undefined' && module.exports) {
   Pouch = require('../src/pouch.js');
   module.exports = {
@@ -268,7 +430,17 @@ if (typeof module !== 'undefined' && module.exports) {
     putAfter: putAfter,
     putBranch: putBranch,
     putTree: putTree,
+    writeDocs: writeDocs,
     cleanupTestDatabases: cleanupTestDatabases,
-    PERSIST_DATABASES: PERSIST_DATABASES
+    PERSIST_DATABASES: PERSIST_DATABASES,
+    eliminateDuplicates: eliminateDuplicates,
+    enableCORS: enableCORS,
+    enableCORSCredentials: enableCORSCredentials,
+    setupAdminAndMemberConfig: setupAdminAndMemberConfig,
+    tearDownAdminAndMemberConfig: tearDownAdminAndMemberConfig,
+    disableCORS: disableCORS,
+    disableCORSCredentials: disableCORSCredentials,
+    cleanUpCors: cleanUpCors,
+    deleteCookieAuth: deleteCookieAuth
   };
 }

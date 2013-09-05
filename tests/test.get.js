@@ -8,9 +8,8 @@
 var adapters = ['http-1', 'local-1'];
 var qunit = module;
 var LevelPouch;
+var utils;
 
-// if we are running under node.js, set things up
-// a little differently, and only test the leveldb adapter
 if (typeof module !== undefined && module.exports) {
   Pouch = require('../src/pouch.js');
   LevelPouch = require('../src/adapters/pouch.leveldb.js');
@@ -87,6 +86,24 @@ adapters.map(function(adapter) {
             strictEqual(err.error, "not_found", "correct error");
             strictEqual(err.reason, "deleted", "correct reason");
             start();
+          });
+        });
+      });
+    });
+  });
+
+  asyncTest("Get local_seq of document", function() {
+    initTestDB(this.name, function(err, db) {
+      db.post({test:"somestuff"}, function(err, info1) {
+        db.get(info1.id, {local_seq: true}, function(err, res) {
+          ok(res);
+          strictEqual(res._local_seq, 1);
+          db.post({test:"someotherstuff"}, function(err, info2) {
+            db.get(info2.id, {local_seq: true}, function(err, res) {
+              ok(res);
+              strictEqual(res._local_seq, 2);
+              start();
+            });
           });
         });
       });

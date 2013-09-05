@@ -1,49 +1,35 @@
 /*jshint strict: false */
-/*global request: true, Buffer: true, escape: true, $:true */
-/*global extend: true, Crypto: true */
-/*global chrome*/
+/*global Buffer: true, escape: true, module, window, Crypto */
+/*global chrome, extend, ajax, btoa, atob, uuid, require, PouchMerge: true */
 
-// Pretty dumb name for a function, just wraps callback calls so we dont
-// to if (callback) callback() everywhere
-var call = function(fun) {
-  var args = Array.prototype.slice.call(arguments, 1);
-  if (typeof fun === typeof Function) {
-    fun.apply(this, args);
-  }
-};
+var PouchUtils = {};
 
-// Wrapper for functions that call the bulkdocs api with a single doc,
-// if the first result is an error, return an error
-var yankError = function(callback) {
-  return function(err, results) {
-    if (err || results[0].error) {
-      call(callback, err || results[0]);
-    } else {
-      call(callback, null, results[0]);
-    }
-  };
-};
+if (typeof module !== 'undefined' && module.exports) {
+  PouchMerge = require('./pouch.merge.js');
+  PouchUtils.extend = require('./deps/extend');
+  PouchUtils.ajax = require('./deps/ajax');
+  PouchUtils.uuid = require('./deps/uuid');
+  PouchUtils.Crypto = require('./deps/md5.js');
+} else {
+  PouchUtils.Crypto = Crypto;
+  PouchUtils.extend = extend;
+  PouchUtils.ajax = ajax;
+  PouchUtils.uuid = uuid;
+}
 
-var isLocalId = function(id) {
-  return (/^_local/).test(id);
-};
-
-var isAttachmentId = function(id) {
-  return (/\//.test(id) && !isLocalId(id) && !/^_design/.test(id));
-};
-
-// Parse document ids: docid[/attachid]
-//   - /attachid is optional, and can have slashes in it too
-//   - int ids and strings beginning with _design or _local are not split
-// returns an object: { docId: docid, attachmentId: attachid }
-var parseDocId = function(id) {
-  var ids = (typeof id === 'string') && !(/^_(design|local)\//.test(id)) ?
-    id.split('/') : [id];
-  return {
-    docId: ids[0],
-    attachmentId: ids.splice(1).join('/').replace(/^\/+/, '')
-  };
-};
+// List of top level reserved words for doc
+var reservedWords = [
+  '_id',
+  '_rev',
+  '_attachments',
+  '_deleted',
+  '_revisions',
+  '_revs_info',
+  '_conflicts',
+  '_deleted_conflicts',
+  '_local_seq',
+  '_rev_tree'
+];
 
 // Determine id an ID is valid
 //   - invalid IDs begin with an underescore that does not begin '_design' or '_local'
@@ -55,27 +41,86 @@ var isValidId = function(id) {
   return true;
 };
 
-// Preprocess documents, parse their revisions, assign an id and a
-// revision for new writes that are missing them, etc
-var parseDoc = function(doc, newEdits) {
-  var error = null;
+var isChromeApp = function(){
+  return (typeof chrome !== "undefined" &&
+          typeof chrome.storage !== "undefined" &&
+          typeof chrome.storage.local !== "undefined");
+};
 
-  // check for an attachment id and add attachments as needed
-  if (doc._id) {
-    var id = parseDocId(doc._id);
-    if (id.attachmentId !== '') {
-      var attachment = btoa(JSON.stringify(doc));
-      doc = {_id: id.docId};
-      if (!doc._attachments) {
-        doc._attachments = {};
+// Pretty dumb name for a function, just wraps callback calls so we dont
+// to if (callback) callback() everywhere
+PouchUtils.call = function(fun) {
+  if (typeof fun === typeof Function) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    fun.apply(this, args);
+  }
+};
+
+PouchUtils.isLocalId = function(id) {
+  return (/^_local/).test(id);
+};
+
+// check if a specific revision of a doc has been deleted
+//  - metadata: the metadata object from the doc store
+//  - rev: (optional) the revision to check. defaults to winning revision
+PouchUtils.isDeleted = function(metadata, rev) {
+  if (!rev) {
+    rev = PouchMerge.winningRev(metadata);
+  }
+  if (rev.indexOf('-') >= 0) {
+    rev = rev.split('-')[1];
+  }
+  var deleted = false;
+  PouchMerge.traverseRevTree(metadata.rev_tree, function(isLeaf, pos, id, acc, opts) {
+    if (id === rev) {
+      deleted = !!opts.deleted;
+    }
+  });
+
+  return deleted;
+};
+
+PouchUtils.filterChange = function(opts) {
+  return function(change) {
+    var req = {};
+    var hasFilter = opts.filter && typeof opts.filter === 'function';
+
+    req.query = opts.query_params;
+    if (opts.filter && hasFilter && !opts.filter.call(this, change.doc, req)) {
+      return false;
+    }
+    if (opts.doc_ids && opts.doc_ids.indexOf(change.id) === -1) {
+      return false;
+    }
+    if (!opts.include_docs) {
+      delete change.doc;
+    } else {
+      for (var att in change.doc._attachments) {
+        change.doc._attachments[att].stub = true;
       }
-      doc._attachments[id.attachmentId] = {
-        content_type: 'application/json',
-        data: attachment
-      };
+    }
+    return true;
+  };
+};
+
+PouchUtils.processChanges = function(opts, changes, last_seq) {
+  // TODO: we should try to filter and limit as soon as possible
+  changes = changes.filter(PouchUtils.filterChange(opts));
+  if (opts.limit) {
+    if (opts.limit < changes.length) {
+      changes.length = opts.limit;
     }
   }
+  changes.forEach(function(change){
+    PouchUtils.call(opts.onChange, change);
+  });
+  PouchUtils.call(opts.complete, null, {results: changes, last_seq: last_seq});
+};
 
+// Preprocess documents, parse their revisions, assign an id and a
+// revision for new writes that are missing them, etc
+PouchUtils.parseDoc = function(doc, newEdits) {
+  var error = null;
   var nRevNum;
   var newRevId;
   var revInfo;
@@ -86,9 +131,9 @@ var parseDoc = function(doc, newEdits) {
 
   if (newEdits) {
     if (!doc._id) {
-      doc._id = Math.uuid();
+      doc._id = Pouch.uuid();
     }
-    newRevId = Math.uuid(32, 16).toLowerCase();
+    newRevId = Pouch.uuid({length: 32, radix: 16}).toLowerCase();
     if (doc._rev) {
       revInfo = /^(\d+)-(.+)$/.exec(doc._rev);
       if (!revInfo) {
@@ -123,6 +168,9 @@ var parseDoc = function(doc, newEdits) {
     }
     if (!doc._rev_tree) {
       revInfo = /^(\d+)-(.+)$/.exec(doc._rev);
+      if (!revInfo) {
+        return Pouch.Errors.BAD_ARG;
+      }
       nRevNum = parseInt(revInfo[1], 10);
       newRevId = revInfo[2];
       doc._rev_tree = [{
@@ -137,6 +185,13 @@ var parseDoc = function(doc, newEdits) {
   }
   else if (!isValidId(doc._id)) {
     error = Pouch.Errors.RESERVED_ID;
+  }
+
+  for (var key in doc) {
+    if (doc.hasOwnProperty(key) && key[0] === '_' && reservedWords.indexOf(key) === -1) {
+      error = PouchUtils.extend({}, Pouch.Errors.DOC_VALIDATION);
+      error.reason += ': ' + key;
+    }
   }
 
   doc._id = decodeURIComponent(doc._id);
@@ -156,170 +211,13 @@ var parseDoc = function(doc, newEdits) {
   }, {metadata : {}, data : {}});
 };
 
-var compareRevs = function(a, b) {
-  // Sort by id
-  if (a.id !== b.id) {
-    return (a.id < b.id ? -1 : 1);
-  }
-  // Then by deleted
-  if (a.deleted ^ b.deleted) {
-    return (a.deleted ? -1 : 1);
-  }
-  // Then by rev id
-  if (a.rev_tree[0].pos === b.rev_tree[0].pos) {
-    return (a.rev_tree[0].ids < b.rev_tree[0].ids ? -1 : 1);
-  }
-  // Then by depth of edits
-  return (a.rev_tree[0].start < b.rev_tree[0].start ? -1 : 1);
+PouchUtils.isCordova = function(){
+  return (typeof cordova !== "undefined" ||
+          typeof PhoneGap !== "undefined" ||
+          typeof phonegap !== "undefined");
 };
 
-
-// for every node in a revision tree computes its distance from the closest
-// leaf
-var computeHeight = function(revs) {
-  var height = {};
-  var edges = [];
-  Pouch.merge.traverseRevTree(revs, function(isLeaf, pos, id, prnt) {
-    var rev = pos + "-" + id;
-    if (isLeaf) {
-      height[rev] = 0;
-    }
-    if (prnt !== undefined) {
-      edges.push({from: prnt, to: rev});
-    }
-    return rev;
-  });
-
-  edges.reverse();
-  edges.forEach(function(edge) {
-    if (height[edge.from] === undefined) {
-      height[edge.from] = 1 + height[edge.to];
-    } else {
-      height[edge.from] = Math.min(height[edge.from], 1 + height[edge.to]);
-    }
-  });
-  return height;
-};
-
-// returns first element of arr satisfying callback predicate
-var arrayFirst = function(arr, callback) {
-  for (var i = 0; i < arr.length; i++) {
-    if (callback(arr[i], i) === true) {
-      return arr[i];
-    }
-  }
-  return false;
-};
-
-var filterChange = function(opts) {
-  return function(change) {
-    var req = {};
-    req.query = opts.query_params;
-    if (opts.filter && !opts.filter.call(this, change.doc, req)) {
-      return false;
-    }
-    if (opts.doc_ids && opts.doc_ids.indexOf(change.id) !== -1) {
-      return false;
-    }
-    if (!opts.include_docs) {
-      delete change.doc;
-    }
-    call(opts.onChange, change);
-    return true;
-  };
-};
-
-var rootToLeaf = function(tree) {
-  var paths = [];
-  Pouch.merge.traverseRevTree(tree, function(isLeaf, pos, id, history, opts) {
-    history = history ? history.slice(0) : [];
-    history.push({id: id, opts: opts});
-    if (isLeaf) {
-      var rootPos = pos + 1 - history.length;
-      paths.unshift({pos: rootPos, ids: history});
-    }
-    return history;
-  });
-  return paths;
-};
-
-// check if a specific revision of a doc has been deleted
-//  - metadata: the metadata object from the doc store
-//  - rev: (optional) the revision to check. defaults to winning revision
-var isDeleted = function(metadata, rev) {
-  if (!rev) {
-    rev = Pouch.merge.winningRev(metadata);
-  }
-  if (rev.indexOf('-') >= 0) {
-    rev = rev.split('-')[1];
-  }
-  var deleted = false;
-  Pouch.merge.traverseRevTree(metadata.rev_tree, function(isLeaf, pos, id, acc, opts) {
-    if (id === rev) {
-      deleted = !!opts.deleted;
-    }
-  });
-
-  return deleted;
-};
-
-var isChromeApp = function(){
-  return (typeof chrome !== "undefined" && typeof chrome.storage !== "undefined" && typeof chrome.storage.local !== "undefined");
-};
-
-var isCordova = function(){
-  return (typeof cordova !== "undefined" || typeof PhoneGap !== "undefined" || typeof phonegap !== "undefined");
-};
-
-if (typeof module !== 'undefined' && module.exports) {
-  // use node.js's crypto library instead of the Crypto object created by deps/uuid.js
-  var crypto = require('crypto');
-  var Crypto = {
-    MD5: function(str) {
-      return crypto.createHash('md5').update(str).digest('hex');
-    }
-  };
-  var extend = require('./deps/extend');
-  var ajax = require('./deps/ajax');
-
-  request = require('request');
-  _ = require('underscore');
-  $ = _;
-
-  module.exports = {
-    Crypto: Crypto,
-    call: call,
-    yankError: yankError,
-    isLocalId: isLocalId,
-    isAttachmentId: isAttachmentId,
-    parseDocId: parseDocId,
-    parseDoc: parseDoc,
-    isDeleted: isDeleted,
-    compareRevs: compareRevs,
-    computeHeight: computeHeight,
-    arrayFirst: arrayFirst,
-    filterChange: filterChange,
-    atob: function(str) {
-      var base64 = new Buffer(str, 'base64');
-      // Node.js will just skip the characters it can't encode instead of
-      // throwing and exception
-      if (base64.toString('base64') !== str) {
-        throw("Cannot base64 encode full string");
-      }
-      return base64.toString('binary');
-    },
-    btoa: function(str) {
-      return new Buffer(str, 'binary').toString('base64');
-    },
-    extend: extend,
-    ajax: ajax,
-    rootToLeaf: rootToLeaf,
-    isChromeApp: isChromeApp,
-    isCordova: isCordova
-  };
-}
-
-var Changes = function() {
+PouchUtils.Changes = function() {
 
   var api = {};
   var listeners = {};
@@ -328,8 +226,7 @@ var Changes = function() {
     chrome.storage.onChanged.addListener(function(e){
       api.notify(e.db_name.newValue);//object only has oldValue, newValue members
     });
-  }
-  else {
+  } else if (typeof window !== 'undefined') {
     window.addEventListener("storage", function(e) {
       api.notify(e.key);
     });
@@ -379,7 +276,7 @@ var Changes = function() {
         onChange: function(c) {
           if (c.seq > opts.since && !opts.cancelled) {
             opts.since = c.seq;
-            call(opts.onChange, c);
+            PouchUtils.call(opts.onChange, c);
           }
         }
       });
@@ -389,3 +286,28 @@ var Changes = function() {
   return api;
 };
 
+if (typeof window === 'undefined' || !('atob' in window)) {
+  PouchUtils.atob = function(str) {
+    var base64 = new Buffer(str, 'base64');
+    // Node.js will just skip the characters it can't encode instead of
+    // throwing and exception
+    if (base64.toString('base64') !== str) {
+      throw("Cannot base64 encode full string");
+    }
+    return base64.toString('binary');
+  };
+} else {
+  PouchUtils.atob = atob.bind(null);
+}
+
+if (typeof window === 'undefined' || !('btoa' in window)) {
+  PouchUtils.btoa = function(str) {
+    return new Buffer(str, 'binary').toString('base64');
+  };
+} else {
+  PouchUtils.btoa = btoa.bind(null);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = PouchUtils;
+}

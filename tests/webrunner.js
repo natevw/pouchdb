@@ -18,28 +18,63 @@ if (!testFiles.length) {
   // 'test.auth_replication.js',
   testFiles = ['test.basics.js', 'test.all_dbs.js', 'test.changes.js',
                'test.bulk_docs.js', 'test.all_docs.js', 'test.conflicts.js',
-               'test.merge_rev_tree.js',  'test.revs_diff.js',
+               'test.revs_diff.js',
                'test.replication.js', 'test.views.js', 'test.taskqueue.js',
                'test.design_docs.js', 'test.issue221.js', 'test.http.js',
                'test.gql.js', 'test.compaction.js', 'test.get.js',
-               'test.attachments.js'];
+               'test.attachments.js', 'test.uuids.js', 'test.shash_id.js',
+               'test.cors.js'];
 }
 
 testFiles.unshift('test.utils.js');
 
 var sourceFiles = {
-  'dev': ['../src/deps/uuid.js', '../src/deps/extend.js', '../src/deps/ajax.js',
-          '../src/pouch.js', '../src/pouch.adapter.js', '../src/pouch.merge.js',
-          '../src/pouch.replicate.js',
-          '../src/pouch.collate.js', '../src/pouch.utils.js',
-          '../src/adapters/pouch.http.js', '../src/adapters/pouch.idb.js',
+  'dev': ['../src/deps/md5.js',
+          '../src/deps/uuid.js',
+          '../src/deps/extend.js',
+          '../src/deps/ajax.js',
+          '../src/pouch.utils.js',
+          '../src/pouch.collate.js',
+          '../src/pouch.merge.js',
+          '../src/pouch.js',
+          '../src/pouch.adapter.js',
+          '../src/adapters/pouch.http.js',
+          '../src/adapters/pouch.idb.js',
           '../src/adapters/pouch.websql.js',
+          '../src/pouch.replicate.js',
           '../src/plugins/pouchdb.gql.js',
           '../src/plugins/pouchdb.mapreduce.js',
           '../src/plugins/pouchdb.spatial.js'],
   'release': ['../dist/pouchdb-nightly.js', '../src/deps/extend.js', '../src/deps/ajax.js'],
   'release-min': ['../dist/pouchdb-nightly.min.js', '../src/deps/extend.js', '../src/deps/ajax.js']
 };
+
+// Logic to automatically scoll qunit tests. Required for saucelabs output, to exactly see whta is happening
+(function() {
+  var scroll = window.location.search.match(/[?&]scroll=true/);
+  if (!scroll) {
+    return;
+  }
+
+  function findPos(obj) {
+    var curtop = 0;
+    if (obj.offsetParent) {
+      do {
+        curtop += obj.offsetTop;
+      } while ((obj = obj.offsetParent));
+      return [curtop];
+    }
+  }
+
+  window.setInterval(function() {
+    try {
+      var running = document.getElementsByClassName('running')[0];
+      window.scroll(0, findPos(running) - 100);
+    } catch (e) {
+      // dont do anything here
+    }
+  }, 2000);
+}());
 
 // Thanks to http://engineeredweb.com/blog/simple-async-javascript-loader/
 function asyncLoadScript(url, callback) {

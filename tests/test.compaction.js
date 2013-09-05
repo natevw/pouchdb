@@ -10,6 +10,7 @@ var autoCompactionAdapters = ['local-1'];
 
 var qunit = module;
 var LevelPouch;
+var utils;
 
 // if we are running under node.js, set things up
 // a little differently, and only test the leveldb adapter
@@ -51,6 +52,15 @@ adapters.map(function(adapter) {
   asyncTest('Compation on empty db', function() {
     initTestDB(this.name, function(err, db) {
       db.compact(function(){
+        ok(true, "compaction finished");
+        start();
+      });
+    });
+  });
+
+  asyncTest('Compation on empty db with interval option', function() {
+    initTestDB(this.name, function(err, db) {
+      db.compact({interval: 199}, function(){
         ok(true, "compaction finished");
         start();
       });

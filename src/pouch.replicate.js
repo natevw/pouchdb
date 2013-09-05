@@ -1,9 +1,12 @@
-/*globals call: false, Crypto: false*/
+/*globals PouchUtils: true */
 
 'use strict';
 
+var PouchUtils;
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = Pouch;
+  PouchUtils = require('./pouch.utils.js');
 }
 
 // We create a basic promise so the caller can cancel the replication possibly
@@ -57,30 +60,33 @@ var RequestManager = function() {
 // to this replication
 var genReplicationId = function(src, target, opts) {
   var filterFun = opts.filter ? opts.filter.toString() : '';
-  return '_local/' + Crypto.MD5(src.id() + target.id() + filterFun);
+  return '_local/' + PouchUtils.Crypto.MD5(src.id() + target.id() + filterFun);
 };
 
 // A checkpoint lets us restart replications from when they were last cancelled
-var fetchCheckpoint = function(target, id, callback) {
-  target.get(id, function(err, doc) {
+var fetchCheckpoint = function(src, target, id, callback) {
+  target.get(id, function(err, targetDoc) {
     if (err && err.status === 404) {
       callback(null, 0);
     } else {
-      callback(null, doc.last_seq);
+      src.get(id, function(err, sourceDoc) {
+        if (err && err.status === 404 || targetDoc.last_seq !== sourceDoc.last_seq) {
+          callback(null, 0);
+        } else {
+          callback(null, sourceDoc.last_seq);
+        }
+      });
     }
   });
 };
 
-var writeCheckpoint = function(target, id, checkpoint, callback) {
+var writeCheckpoint = function(src, target, id, checkpoint, callback) {
   var check = {
     _id: id,
     last_seq: checkpoint
   };
-  target.get(check._id, function(err, doc) {
-    if (doc && doc._rev) {
-      check._rev = doc._rev;
-    }
-    target.put(check, function(err, doc) {
+  target.put(check, function(err, doc) {
+    src.put(check, function(err, doc) {
       callback();
     });
   });
@@ -105,7 +111,6 @@ function replicate(src, target, opts, promise) {
   };
 
   function docsWritten(err, res, len) {
-    requests.notifyRequestComplete();
     if (opts.onChange) {
       for (var i = 0; i < len; i++) {
         /*jshint validthis:true */
@@ -114,7 +119,11 @@ function replicate(src, target, opts, promise) {
     }
     pending -= len;
     result.docs_written += len;
-    isCompleted();
+
+    writeCheckpoint(src, target, repId, last_seq, function(err, res) {
+      requests.notifyRequestComplete();
+      isCompleted();
+    });
   }
 
   function writeDocs() {
@@ -142,7 +151,7 @@ function replicate(src, target, opts, promise) {
       if (continuous) {
         promise.cancel();
       }
-      call(opts.complete, err, null);
+      PouchUtils.call(opts.complete, err, null);
       return;
     }
 
@@ -183,17 +192,15 @@ function replicate(src, target, opts, promise) {
 
   function isCompleted() {
     if (completed && pending === 0) {
-      result.end_time = Date.now();
-      writeCheckpoint(target, repId, last_seq, function(err, res) {
-        call(opts.complete, err, result);
-      });
+      result.end_time = new Date();
+      PouchUtils.call(opts.complete, null, result);
     }
   }
 
-  fetchCheckpoint(target, repId, function(err, checkpoint) {
+  fetchCheckpoint(src, target, repId, function(err, checkpoint) {
 
     if (err) {
-      return call(opts.complete, err);
+      return PouchUtils.call(opts.complete, err);
     }
 
     last_seq = checkpoint;
@@ -245,15 +252,17 @@ Pouch.replicate = function(src, target, opts, callback) {
   if (opts === undefined) {
     opts = {};
   }
-  opts.complete = callback;
+  if (!opts.complete) {
+    opts.complete = callback;
+  }
   var replicateRet = new Promise();
   toPouch(src, function(err, src) {
     if (err) {
-      return call(callback, err);
+      return PouchUtils.call(callback, err);
     }
     toPouch(target, function(err, target) {
       if (err) {
-        return call(callback, err);
+        return PouchUtils.call(callback, err);
       }
       replicate(src, target, opts, replicateRet);
     });

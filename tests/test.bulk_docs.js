@@ -11,6 +11,7 @@
 var adapters = ['local-1', 'http-1'];
 var qunit = module;
 var LevelPouch;
+var utils;
 
 if (typeof module !== undefined && module.exports) {
   Pouch = require('../src/pouch.js');
@@ -89,6 +90,18 @@ adapters.map(function(adapter) {
           ok(results[0].error === 'conflict' || results[1].error === 'conflict');
           start();
         });
+      });
+    });
+  });
+
+  asyncTest('No _rev and new_edits=false', function() {
+    initTestDB(this.name, function(err, db) {
+      var docs = [
+        {_id: "foo", integer: 1}
+      ];
+      db.bulkDocs({docs: docs}, {new_edits: false}, function(err, res) {
+        ok(err, "error reported");
+        start();
       });
     });
   });

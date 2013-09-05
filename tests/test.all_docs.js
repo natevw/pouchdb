@@ -1,13 +1,14 @@
 /*globals initTestDB: false, emit: true, generateAdapterUrl: false */
 /*globals PERSIST_DATABASES: false, initDBPair: false, utils: true */
 /*globals ajax: true, LevelPouch: true, makeDocs: false */
-/*globals cleanupTestDatabases: false */
+/*globals cleanupTestDatabases: false, writeDocs: false */
 
 "use strict";
 
 var adapters = ['http-1', 'local-1'];
 var qunit = module;
 var LevelPouch;
+var utils;
 
 // if we are running under node.js, set things up
 // a little differently, and only test the leveldb adapter
@@ -38,18 +39,6 @@ adapters.map(function(adapter) {
     {_id:"1",a:2,b:4},
     {_id:"2",a:3,b:9}
   ];
-
-
-  function writeDocs(db, docs, callback) {
-    if (!docs.length) {
-      return callback();
-    }
-    var doc = docs.shift();
-    db.put(doc, function(err, doc) {
-      ok(doc.ok, 'docwrite returned ok');
-      writeDocs(db, docs, callback);
-    });
-  }
 
   asyncTest('Testing all docs', function() {
     initTestDB(this.name, function(err, db) {
@@ -226,6 +215,7 @@ adapters.map(function(adapter) {
                   equal(true, result.doc._conflicts instanceof Array,
                         'include docs contains conflicts');
                   equal(2, result.doc._conflicts.length, 'correct number of changes');
+                  equal(conflictDoc1._rev, result.doc._conflicts[0], 'correct conflict rev');
                   db.allDocs({include_docs: true, conflicts: true}, function(err, res) {
                     var row = res.rows[3];
                     equal(4, res.rows.length, 'correct number of changes');
@@ -236,6 +226,7 @@ adapters.map(function(adapter) {
                     equal("3", row.doc._id, 'correct order');
                     ok(row.doc._conflicts instanceof Array);
                     equal(2, row.doc._conflicts.length, 'Correct number of conflicts');
+                    equal(conflictDoc1._rev, res.rows[3].doc._conflicts[0], 'correct conflict rev');
                     start();
                   });
                 }

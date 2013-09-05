@@ -1,21 +1,18 @@
-/*globals extend: true, isDeleted: true, isLocalId: true */
 /*globals Buffer: true */
 
 'use strict';
 
-var pouchdir = '../';
-var Pouch = require(pouchdir + 'pouch.js');
-var call = Pouch.utils.call;
-
-// TODO: this adds the Math.uuid function used in pouch.utils
-// possibly not the best place for it, but it works for now
-require(pouchdir + 'deps/uuid.js');
+var Pouch = require('../pouch.js');
+var PouchMerge = require('../pouch.merge.js');
+var PouchUtils = require('../pouch.utils.js');
+var call = PouchUtils.call;
 
 var path = require('path');
 var fs = require('fs');
 var crypto = require('crypto');
 var EventEmitter = require('events').EventEmitter;
-var levelup = require('levelup');
+
+var levelup = require('level');
 
 var error = function(callback, message) {
   return process.nextTick(function() {
@@ -28,7 +25,7 @@ var BY_SEQ_STORE = 'by-sequence';
 var ATTACH_STORE = 'attach-store';
 var ATTACH_BINARY_STORE = 'attach-binary-store';
 
-// leveldb barks if we try to open a db multiple times
+// leveldb barks if we try to open a db mZultiple times
 // so we cache opened connections here for initstore()
 var STORES = {};
 
@@ -52,17 +49,28 @@ function dbError(callback) {
 }
 
 var LevelPouch = function(opts, callback) {
+
   var opened = false;
   var api = {};
   var update_seq = 0;
   var doc_count = 0;
   var stores = {};
   var name = opts.name;
+  var uuid;
   var change_emitter = CHANGES[name] || new EventEmitter();
 
   CHANGES[name] = change_emitter;
 
+  var uuidPath = opts.name + '.uuid';
+  if (!fs.existsSync(uuidPath)) {
+    uuid = Pouch.uuid();
+    fs.writeFileSync(uuidPath, uuid);
+  } else {
+    uuid = fs.readFileSync(uuidPath);
+  }
+
   function initstore(store_name, encoding) {
+
     var dbpath = path.resolve(path.join(opts.name, store_name));
     opts.valueEncoding = encoding || 'json';
 
@@ -155,24 +163,34 @@ var LevelPouch = function(opts, callback) {
     return opts.name;
   };
 
-  api._info = function(callback) {
-    return call(callback, null, {
-      db_name: opts.name,
-      doc_count: doc_count,
-      update_seq: update_seq
-    });
-  };
+
+   api._info = function(callback) {
+
+     stores[BY_SEQ_STORE].get(DOC_COUNT_KEY, function(err, _doc_count) {
+       if (err) { _doc_count = doc_count; }
+
+       stores[BY_SEQ_STORE].get(UPDATE_SEQ_KEY, function(err, _update_seq) {
+         if (err) { _update_seq = update_seq; }
+
+         return call(callback, null, {
+           db_name: opts.name,
+           doc_count: _doc_count,
+           update_seq: _update_seq
+         });
+       });
+     });
+   };
 
   api._get = function(id, opts, callback) {
-    stores[DOC_STORE].get(id.docId, function(err, metadata) {
+    stores[DOC_STORE].get(id, function(err, metadata) {
       if (err || !metadata){
         return call(callback, Pouch.Errors.MISSING_DOC);
       }
-      if (isDeleted(metadata) && !opts.rev) {
+      if (PouchUtils.isDeleted(metadata) && !opts.rev) {
         return call(callback, Pouch.error(Pouch.Errors.MISSING_DOC, "deleted"));
       }
 
-      var rev = Pouch.merge.winningRev(metadata);
+      var rev = PouchMerge.winningRev(metadata);
       rev = opts.rev ? opts.rev : rev;
       var seq = metadata.rev_map[rev];
 
@@ -207,7 +225,7 @@ var LevelPouch = function(opts, callback) {
         return call(callback, err);
       }
 
-      data = opts.encode ? btoa(attach) : attach;
+      data = opts.encode ? PouchUtils.btoa(attach) : attach;
       call(callback, null, data);
     });
   };
@@ -216,13 +234,12 @@ var LevelPouch = function(opts, callback) {
 
     var newEdits = opts.new_edits;
     var info = [];
-    var docs = [];
     var results = [];
 
     // parse the docs and give each a sequence number
     var userDocs = req.docs;
     info = userDocs.map(function(doc, i) {
-      var newDoc = Pouch.utils.parseDoc(doc, newEdits);
+      var newDoc = PouchUtils.parseDoc(doc, newEdits);
       newDoc._bulk_seq = i;
       if (newDoc.metadata && !newDoc.metadata.rev_map) {
         newDoc.metadata.rev_map = {};
@@ -237,23 +254,11 @@ var LevelPouch = function(opts, callback) {
       return call(callback, infoErrors[0]);
     }
 
-
-    // group multiple edits to the same document
-    info.forEach(function(info) {
-      if (info.error) {
-        return results.push(info);
-      }
-      if (!docs.length || !newEdits || info.metadata.id !== docs[docs.length-1].metadata.id) {
-        return docs.push(info);
-      }
-      results.push(makeErr(Pouch.Errors.REV_CONFLICT, info._bulk_seq));
-    });
-
     function processDocs() {
-      if (docs.length === 0) {
+      if (info.length === 0) {
         return complete();
       }
-      var currentDoc = docs.pop();
+      var currentDoc = info.shift();
       stores[DOC_STORE].get(currentDoc.metadata.id, function(err, oldDoc) {
         if (err && err.name === 'NotFoundError') {
           insertDoc(currentDoc, processDocs);
@@ -266,7 +271,7 @@ var LevelPouch = function(opts, callback) {
 
     function insertDoc(doc, callback) {
       // Can't insert new deleted documents
-      if ('was_delete' in opts && isDeleted(doc.metadata)) {
+      if ('was_delete' in opts && PouchUtils.isDeleted(doc.metadata)) {
         results.push(makeErr(Pouch.Errors.MISSING_DOC, doc._bulk_seq));
         return callback();
       }
@@ -282,10 +287,12 @@ var LevelPouch = function(opts, callback) {
     }
 
     function updateDoc(oldDoc, docInfo, callback) {
-      var merged = Pouch.merge(oldDoc.rev_tree, docInfo.metadata.rev_tree[0], 1000);
+      var merged = PouchMerge.merge(oldDoc.rev_tree, docInfo.metadata.rev_tree[0], 1000);
 
-      var conflict = (isDeleted(oldDoc) && isDeleted(docInfo.metadata)) ||
-        (!isDeleted(oldDoc) && newEdits && merged.conflicts !== 'new_leaf');
+      var conflict = (PouchUtils.isDeleted(oldDoc) &&
+                      PouchUtils.isDeleted(docInfo.metadata)) ||
+        (!PouchUtils.isDeleted(oldDoc) &&
+         newEdits && merged.conflicts !== 'new_leaf');
 
       if (conflict) {
         results.push(makeErr(Pouch.Errors.REV_CONFLICT, docInfo._bulk_seq));
@@ -303,7 +310,7 @@ var LevelPouch = function(opts, callback) {
 
       doc.data._id = doc.metadata.id;
 
-      if (isDeleted(doc.metadata)) {
+      if (PouchUtils.isDeleted(doc.metadata)) {
         doc.data._deleted = true;
       }
 
@@ -334,7 +341,7 @@ var LevelPouch = function(opts, callback) {
           // if data is a string, it's likely to actually be base64 encoded
           if (typeof data === 'string') {
             try {
-              data = Pouch.utils.atob(data);
+              data = PouchUtils.atob(data);
             } catch(e) {
               call(callback, Pouch.error(Pouch.Errors.BAD_ARG, "Attachments need to be base64 encoded"));
               return;
@@ -358,7 +365,7 @@ var LevelPouch = function(opts, callback) {
         doc.metadata.rev_map[doc.metadata.rev] = doc.metadata.seq;
 
         stores[BY_SEQ_STORE].put(doc.metadata.seq, doc.data, function(err) {
-          if (err) {
+          if (err && Pouch.DEBUG) {
             return console.error(err);
           }
 
@@ -409,7 +416,7 @@ var LevelPouch = function(opts, callback) {
         }
 
         stores[ATTACH_STORE].put(digest, newAtt, function(err) {
-          if (err) {
+          if (err && Pouch.DEBUG) {
             return console.error(err);
           }
           // do not try to store empty attachments
@@ -418,7 +425,7 @@ var LevelPouch = function(opts, callback) {
           }
           stores[ATTACH_BINARY_STORE].put(digest, data, function(err) {
             callback(err);
-            if (err) {
+            if (err && Pouch.DEBUG) {
               return console.error(err);
             }
           });
@@ -436,7 +443,7 @@ var LevelPouch = function(opts, callback) {
           return aresults.push(result);
         }
         var metadata = result.metadata;
-        var rev = Pouch.merge.winningRev(metadata);
+        var rev = PouchMerge.winningRev(metadata);
 
         aresults.push({
           ok: true,
@@ -444,14 +451,14 @@ var LevelPouch = function(opts, callback) {
           rev: rev
         });
 
-        if (Pouch.utils.isLocalId(metadata.id)) {
+        if (PouchUtils.isLocalId(metadata.id)) {
           return;
         }
 
         var change = {
           id: metadata.id,
           seq: metadata.seq,
-          changes: Pouch.merge.collectLeaves(metadata.rev_tree),
+          changes: PouchMerge.collectLeaves(metadata.rev_tree),
           doc: result.data
         };
         change.doc._rev = rev;
@@ -492,40 +499,43 @@ var LevelPouch = function(opts, callback) {
     var docstream = stores[DOC_STORE].readStream(readstreamOpts);
     docstream.on('data', function(entry) {
       function allDocsInner(metadata, data) {
-        if (Pouch.utils.isLocalId(metadata.id)) {
+        if (PouchUtils.isLocalId(metadata.id)) {
           return;
         }
         var doc = {
           id: metadata.id,
           key: metadata.id,
           value: {
-            rev: Pouch.merge.winningRev(metadata)
+            rev: PouchMerge.winningRev(metadata)
           }
         };
         if (opts.include_docs) {
           doc.doc = data;
           doc.doc._rev = doc.value.rev;
           if (opts.conflicts) {
-            doc.doc._conflicts = Pouch.merge.collectConflicts(metadata);
+            doc.doc._conflicts = PouchMerge.collectConflicts(metadata);
+          }
+          for (var att in doc.doc._attachments) {
+            doc.doc._attachments[att].stub = true;
           }
         }
         if ('keys' in opts) {
           if (opts.keys.indexOf(metadata.id) > -1) {
-            if (isDeleted(metadata)) {
+            if (PouchUtils.isDeleted(metadata)) {
               doc.value.deleted = true;
               doc.doc = null;
             }
             resultsMap[doc.id] = doc;
           }
         } else {
-          if(!isDeleted(metadata)) {
+          if(!PouchUtils.isDeleted(metadata)) {
             results.push(doc);
           }
         }
       }
       var metadata = entry.value;
       if (opts.include_docs) {
-        var seq = metadata.rev_map[Pouch.merge.winningRev(metadata)];
+        var seq = metadata.rev_map[PouchMerge.winningRev(metadata)];
         stores[BY_SEQ_STORE].get(seq, function(err, data) {
           allDocsInner(metadata, data);
         });
@@ -536,7 +546,9 @@ var LevelPouch = function(opts, callback) {
     });
     docstream.on('error', function(err) {
       // TODO: handle error
-      console.error(err);
+      if (Pouch.DEBUG) {
+        console.error(err);
+      }
     });
     docstream.on('end', function() {
     });
@@ -555,7 +567,9 @@ var LevelPouch = function(opts, callback) {
       }
       return call(callback, null, {
         total_rows: results.length,
-        rows: ('limit' in opts) ? results.slice(0, opts.limit) : results
+        offset: opts.skip,
+        rows: ('limit' in opts) ? results.slice(opts.skip, opts.limit + opts.skip) :
+          (opts.skip > 0) ? results.slice(opts.skip) : results
       });
     });
   };
@@ -576,41 +590,40 @@ var LevelPouch = function(opts, callback) {
         streamOpts.start = opts.since ? opts.since + 1 : 0;
       }
 
-      if (opts.limit) {
-        streamOpts.limit = opts.limit;
-      }
-
       var changeStream = stores[BY_SEQ_STORE].readStream(streamOpts);
       changeStream
         .on('data', function(data) {
-          if (Pouch.utils.isLocalId(data.key)) {
+          if (PouchUtils.isLocalId(data.key)) {
             return;
           }
 
           stores[DOC_STORE].get(data.value._id, function(err, metadata) {
-            if (Pouch.utils.isLocalId(metadata.id)) {
+            if (PouchUtils.isLocalId(metadata.id)) {
               return;
             }
 
+            var mainRev = PouchMerge.winningRev(metadata);
+            var changeList = [{rev: mainRev}];
+            if (opts.style === 'all_docs') {
+              changeList = PouchMerge.collectLeaves(metadata.rev_tree)
+                .map(function(x) { return {rev: x.rev}; });
+            }
             var change = {
               id: metadata.id,
               seq: metadata.seq,
-              changes: Pouch.merge.collectLeaves(metadata.rev_tree)
-                .map(function(x) { return {rev: x.rev}; }),
+              changes: changeList,
               doc: data.value
             };
+            change.doc._rev = mainRev;
 
             if (last_seq < metadata.seq) {
               last_seq = metadata.seq;
             }
-
-            change.doc._rev = Pouch.merge.winningRev(metadata);
-
-           if (isDeleted(metadata)) {
+            if (PouchUtils.isDeleted(metadata, mainRev)) {
               change.deleted = true;
             }
             if (opts.conflicts) {
-              change.doc._conflicts = Pouch.merge.collectConflicts(metadata);
+              change.doc._conflicts = PouchMerge.collectConflicts(metadata);
             }
 
             // Ensure duplicated dont overwrite winning rev
@@ -621,16 +634,28 @@ var LevelPouch = function(opts, callback) {
         })
         .on('error', function(err) {
           // TODO: handle errors
-          console.error(err);
+          if (Pouch.DEBUG) {
+            console.error(err);
+          }
         })
         .on('close', function() {
-          changeListener = Pouch.utils.filterChange(opts);
+          var filter = PouchUtils.filterChange(opts);
+          changeListener = function(change){
+            if (filter(change)) {
+              call(opts.onChange, change);
+            }
+          };
           if (opts.continuous && !opts.cancelled) {
             change_emitter.on('change', changeListener);
           }
-          // filters changes in-place, calling opts.onChange on matching changes
-          results = results.filter(Pouch.utils.filterChange(opts));
-          call(opts.complete, null, {results: results, last_seq: last_seq});
+          results = results.sort(function(a, b) {
+            if (descending) {
+              return b.seq - a.seq;
+            } else {
+              return a.seq - b.seq;
+            }
+          });
+          PouchUtils.processChanges(opts, results, last_seq);
         });
     }
 
@@ -807,6 +832,11 @@ LevelPouch.destroy = function(name, callback) {
   });
 
   function done() {
+    var uuidPath = name + '.uuid';
+    if (fs.existsSync(uuidPath)) {
+      fs.unlinkSync(uuidPath);
+    }
+
     rmdir(name, function(err) {
       if (err && err.code === 'ENOENT') {
         // TODO: MISSING_DOC name is somewhat misleading in this context

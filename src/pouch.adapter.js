@@ -1,13 +1,70 @@
-/*globals Pouch: true, yankError: false, extend: false, call: false, parseDocId: false, traverseRevTree: false */
-/*globals arrayFirst: false, rootToLeaf: false, computeHeight: false */
-/*globals cordova, isCordova */
+/*globals Pouch: true, cordova, PouchUtils: true, PouchMerge */
 
 "use strict";
+
+var PouchAdapter;
+var PouchUtils;
+
+if (typeof module !== 'undefined' && module.exports) {
+  PouchUtils = require('./pouch.utils.js');
+}
+
+var call = PouchUtils.call;
 
 /*
  * A generic pouch adapter
  */
-var PouchAdapter = function(opts, callback) {
+
+// returns first element of arr satisfying callback predicate
+function arrayFirst(arr, callback) {
+  for (var i = 0; i < arr.length; i++) {
+    if (callback(arr[i], i) === true) {
+      return arr[i];
+    }
+  }
+  return false;
+}
+
+// Wrapper for functions that call the bulkdocs api with a single doc,
+// if the first result is an error, return an error
+function yankError(callback) {
+  return function(err, results) {
+    if (err || results[0].error) {
+      call(callback, err || results[0]);
+    } else {
+      call(callback, null, results[0]);
+    }
+  };
+}
+
+// for every node in a revision tree computes its distance from the closest
+// leaf
+function computeHeight(revs) {
+  var height = {};
+  var edges = [];
+  PouchMerge.traverseRevTree(revs, function(isLeaf, pos, id, prnt) {
+    var rev = pos + "-" + id;
+    if (isLeaf) {
+      height[rev] = 0;
+    }
+    if (prnt !== undefined) {
+      edges.push({from: prnt, to: rev});
+    }
+    return rev;
+  });
+
+  edges.reverse();
+  edges.forEach(function(edge) {
+    if (height[edge.from] === undefined) {
+      height[edge.from] = 1 + height[edge.to];
+    } else {
+      height[edge.from] = Math.min(height[edge.from], 1 + height[edge.to]);
+    }
+  });
+  return height;
+}
+
+PouchAdapter = function(opts, callback) {
 
   var api = {};
 
@@ -71,6 +128,9 @@ var PouchAdapter = function(opts, callback) {
       callback = opts;
       opts = {};
     }
+    if (typeof doc !== 'object' || Array.isArray(doc)) {
+      return call(callback, Pouch.Errors.NOT_AN_OBJECT);
+    }
     return customApi.bulkDocs({docs: [doc]}, opts,
         autoCompact(yankError(callback)));
   };
@@ -80,15 +140,21 @@ var PouchAdapter = function(opts, callback) {
       callback = opts;
       opts = {};
     }
-
-    if (!doc || !('_id' in doc)) {
+    if (typeof doc !== 'object') {
+      return call(callback, Pouch.Errors.NOT_AN_OBJECT);
+    }
+    if (!('_id' in doc)) {
       return call(callback, Pouch.Errors.MISSING_ID);
     }
     return customApi.bulkDocs({docs: [doc]}, opts,
         autoCompact(yankError(callback)));
   };
 
-  api.putAttachment = function (id, rev, blob, type, callback) {
+  api.putAttachment = function (docId, attachmentId, rev, blob, type, callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('putAttachment', arguments);
+      return;
+    }
     if (typeof type === 'function') {
       callback = type;
       type = blob;
@@ -100,21 +166,20 @@ var PouchAdapter = function(opts, callback) {
       blob = rev;
       rev = null;
     }
-    id = parseDocId(id);
 
     function createAttachment(doc) {
       doc._attachments = doc._attachments || {};
-      doc._attachments[id.attachmentId] = {
+      doc._attachments[attachmentId] = {
         content_type: type,
         data: blob
       };
       api.put(doc, callback);
     }
 
-    api.get(id.docId, function(err, doc) {
+    api.get(docId, function(err, doc) {
       // create new doc
       if (err && err.error === Pouch.Errors.MISSING_DOC.error) {
-        createAttachment({_id: id.docId});
+        createAttachment({_id: docId});
         return;
       }
       if (err) {
@@ -131,21 +196,23 @@ var PouchAdapter = function(opts, callback) {
     });
   };
 
-  api.removeAttachment = function (id, rev, callback) {
-    id = parseDocId(id);
-    api.get(id.docId, function(err, obj) {
+  api.removeAttachment = function (docId, attachmentId, rev, callback) {
+    api.get(docId, function(err, obj) {
       if (err) {
         call(callback, err);
         return;
       }
-
       if (obj._rev !== rev) {
         call(callback, Pouch.Errors.REV_CONFLICT);
         return;
       }
-
-      obj._attachments = obj._attachments || {};
-      delete obj._attachments[id.attachmentId];
+      if (!obj._attachments) {
+        return call(callback, null);
+      }
+      delete obj._attachments[attachmentId];
+      if (Object.keys(obj._attachments).length === 0){
+        delete obj._attachments;
+      }
       api.put(obj, callback);
     });
   };
@@ -213,7 +280,7 @@ var PouchAdapter = function(opts, callback) {
         }
       });
 
-      Pouch.merge.traverseRevTree(rev_tree, function(isLeaf, pos, revHash, ctx, opts) {
+      PouchMerge.traverseRevTree(rev_tree, function(isLeaf, pos, revHash, ctx, opts) {
         var rev = pos + '-' + revHash;
         if (opts.status === 'available' && candidates.indexOf(rev) !== -1) {
           opts.status = 'missing';
@@ -226,7 +293,11 @@ var PouchAdapter = function(opts, callback) {
 
   // compact the whole database using single document
   // compaction
-  api.compact = function(callback) {
+  api.compact = function(opts, callback) {
+    if (typeof opts === 'function') {
+      callback = opts;
+      opts = {};
+    }
     api.changes({complete: function(err, res) {
       if (err) {
         call(callback); // TODO: silently fail
@@ -290,7 +361,7 @@ var PouchAdapter = function(opts, callback) {
             // situation the same way as if revision tree was empty
             rev_tree = [];
           }
-          leaves = Pouch.merge.collectLeaves(rev_tree).map(function(leaf){
+          leaves = PouchMerge.collectLeaves(rev_tree).map(function(leaf){
             return leaf.rev;
           });
           finishOpenRevs();
@@ -315,23 +386,6 @@ var PouchAdapter = function(opts, callback) {
       return; // open_revs does not like other options
     }
 
-    id = parseDocId(id);
-    if (id.attachmentId !== '') {
-      return customApi._get(id, opts, function(err, result){
-        if (err) {
-          return call(callback, err);
-        }
-        if (result.doc._attachments && result.doc._attachments[id.attachmentId]) {
-          customApi._getAttachment(result.doc._attachments[id.attachmentId],
-                                   {encode: false, ctx: result.ctx}, function(err, data) {
-            return call(callback, null, data);
-          });
-        } else {
-          return call(callback, Pouch.Errors.MISSING_DOC);
-        }
-      });
-    }
-
     return customApi._get(id, opts, function(err, result) {
       if (err) {
         return call(callback, err);
@@ -342,14 +396,14 @@ var PouchAdapter = function(opts, callback) {
       var ctx = result.ctx;
 
       if (opts.conflicts) {
-        var conflicts = Pouch.merge.collectConflicts(metadata);
+        var conflicts = PouchMerge.collectConflicts(metadata);
         if (conflicts.length) {
           doc._conflicts = conflicts;
         }
       }
 
       if (opts.revs || opts.revs_info) {
-        var paths = rootToLeaf(metadata.rev_tree);
+        var paths = PouchMerge.rootToLeaf(metadata.rev_tree);
         var path = arrayFirst(paths, function(arr) {
           return arr.ids.map(function(x) { return x.id; })
             .indexOf(doc._rev.split('-')[1]) !== -1;
@@ -379,9 +433,16 @@ var PouchAdapter = function(opts, callback) {
         }
       }
 
+      if (opts.local_seq) {
+        doc._local_seq = result.metadata.seq;
+      }
+
       if (opts.attachments && doc._attachments) {
         var attachments = doc._attachments;
         var count = Object.keys(attachments).length;
+        if (count === 0) {
+          return call(callback, null, doc);
+        }
         Object.keys(attachments).forEach(function(key) {
           customApi._getAttachment(attachments[key], {encode: true, ctx: ctx}, function(err, data) {
             doc._attachments[key].data = data;
@@ -401,13 +462,25 @@ var PouchAdapter = function(opts, callback) {
     });
   };
 
-  api.getAttachment = function(id, opts, callback) {
+  api.getAttachment = function(docId, attachmentId, opts, callback) {
+    if (!api.taskqueue.ready()) {
+      api.taskqueue.addTask('getAttachment', arguments);
+      return;
+    }
     if (opts instanceof Function) {
       callback = opts;
       opts = {};
     }
-    customApi.get(id, function(err, res) {
-      callback(err, res);
+    customApi._get(docId, opts, function(err, res) {
+      if (err) {
+        return call(callback, err);
+      }
+      if (res.doc._attachments && res.doc._attachments[attachmentId]) {
+        opts.ctx = res.ctx;
+        customApi._getAttachment(res.doc._attachments[attachmentId], opts, callback);
+      } else {
+        return call(callback, Pouch.Errors.MISSING_DOC);
+      }
     });
   };
 
@@ -434,6 +507,9 @@ var PouchAdapter = function(opts, callback) {
         return;
       }
     }
+    if (typeof opts.skip === 'undefined') {
+      opts.skip = 0;
+    }
 
     return customApi._allDocs(opts, callback);
   };
@@ -443,10 +519,17 @@ var PouchAdapter = function(opts, callback) {
       api.taskqueue.addTask('changes', arguments);
       return;
     }
-    opts = extend(true, {}, opts);
+    opts = PouchUtils.extend(true, {}, opts);
 
     if (!opts.since) {
       opts.since = 0;
+    }
+    if (opts.since === 'latest') {
+      api.info(function (err, info) {
+        opts.since = info.update_seq  - 1;
+        api.changes(opts);
+      });
+      return;
     }
 
     if (!('descending' in opts)) {
@@ -494,7 +577,7 @@ var PouchAdapter = function(opts, callback) {
     if (!opts) {
       opts = {};
     } else {
-      opts = extend(true, {}, opts);
+      opts = PouchUtils.extend(true, {}, opts);
     }
 
     if (!req || !req.docs || req.docs.length < 1) {
@@ -505,7 +588,13 @@ var PouchAdapter = function(opts, callback) {
       return call(callback, Pouch.Errors.QUERY_PARSE_ERROR);
     }
 
-    req = extend(true, {}, req);
+    for (var i = 0; i < req.docs.length; ++i) {
+      if (typeof req.docs[i] !== 'object' || Array.isArray(req.docs[i])) {
+        return call(callback, Pouch.Errors.NOT_AN_OBJECT);
+      }
+    }
+
+    req = PouchUtils.extend(true, {}, req);
     if (!('new_edits' in opts)) {
       opts.new_edits = true;
     }
@@ -570,7 +659,7 @@ var PouchAdapter = function(opts, callback) {
     api.taskqueue.execute(api);
   }
 
-  if (isCordova()){
+  if (PouchUtils.isCordova()) {
     //to inform websql adapter that we can use api
     cordova.fireWindowEvent(opts.name + "_pouch", {});
   }
